@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import pandas as pd
 import numpy as np
+import sympy as sp
 
 # seuphyx
 from seuphyx.core.oil.tabs.regression import (
@@ -78,20 +79,24 @@ def _plot_integer_distribution(result):
         return
 
     max_n = result["global_params"]["max_n"]
+    plot_max_n = min(10, max(10, max_n + 1))
+    n_float_visible = n_float[(n_float >= 0) & (n_float <= plot_max_n)]
     fig = go.Figure()
     fig.add_trace(
         go.Histogram(
-            x=n_float,
-            nbinsx=max(20, max_n * 12),
+            x=n_float_visible,
+            xbins=dict(start=0, end=plot_max_n, size=0.1),
             name="n 估计值分布",
         ))
-    for n_value in range(1, max_n + 1):
+    for n_value in range(1, min(max_n, plot_max_n) + 1):
         fig.add_vline(x=n_value, line_dash="dash", line_color="#333333")
 
     fig.update_layout(
         title="物理变换后的整数 n 峰值分布",
         xaxis_title="n_float = A / ((U-b) * t^(3/2))",
         yaxis_title="数据点数量",
+        xaxis=dict(range=[0, plot_max_n], dtick=1),
+        bargap=0.08,
         margin=dict(l=60, r=30, t=60, b=60),
     )
     st.plotly_chart(fig, key="integer_n_distribution", use_container_width=True)
@@ -206,7 +211,8 @@ def render_tab_regress():
 
     st.subheader("拟合公式")
     for n_value, (_, _, fitted_expr) in result["data"].items():
-        st.write(f"**n = {n_value}:** U(t) = {fitted_expr}")
+        st.markdown(f"**n = {n_value}**")
+        st.latex(rf"U_{{{n_value}}}(t) = {sp.latex(fitted_expr)}")
 
     with st.expander("查看物理聚类明细", expanded=False):
         detail_cols = [
