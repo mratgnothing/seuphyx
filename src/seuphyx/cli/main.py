@@ -83,6 +83,10 @@ def run_streamlit_app(name):
         "false",
         "--server.enableXsrfProtection",
         "false",
+        "--server.headless",
+        "true",
+        "--browser.gatherUsageStats",
+        "false",
         "--server.baseUrlPath",
         "/seuphyx/oil",
     ]

@@ -7,13 +7,12 @@ import plotly.io as pio
 import pandas as pd
 # seuphyx
 from seuphyx.web import StreamlitConfig, login
-from seuphyx.core.oil.tabs import (
-    render_tab_record,
-    render_tab_train,
-    render_tab_classify,
-    render_tab_regress,
-    render_tab_report,
-)
+from seuphyx.core.oil.tabs.tab_record import render_tab_record
+from seuphyx.core.oil.tabs.tab_train import render_tab_train
+from seuphyx.core.oil.tabs.tab_classify import render_tab_classify
+from seuphyx.core.oil.tabs.tab_regress import render_tab_regress
+from seuphyx.core.oil.tabs.tab_vision import render_tab_vision
+from seuphyx.core.oil.tabs.tab_report import render_tab_report
 import seuphyx
 
 # ==== Streamlit 页面配置 ====
@@ -191,8 +190,8 @@ else:
         st.sidebar.subheader("已保存的数据点：")
         st.sidebar.dataframe(st.session_state.data)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["1. 数据记录", "2. 训练模型（选做）", "3. 数据分类", "4. 符号回归", "5. 打印报告"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["1. 数据记录", "2. 训练模型（选做）", "3. 数据分类", "4. 物理拟合", "5. 视觉测量", "6. 打印报告"])
 
     # 渲染各个 Tab
     with tab1:
@@ -208,4 +207,7 @@ else:
         render_tab_regress()
 
     with tab5:
+        render_tab_vision()
+
+    with tab6:
         render_tab_report()

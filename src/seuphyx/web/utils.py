@@ -152,8 +152,8 @@ def login():
         #     st.error("学号应为数字，请重新输入。")
         #     is_valid = False
 
-        if len(student_id) != 9:
-            st.error("学号应为9位，请重新输入。")
+        if not 8 <= len(student_id) <= 10:
+            st.error("学号应为8到10位，请重新输入。")
             is_valid = False
 
         if not student_name.isalpha():

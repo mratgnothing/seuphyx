@@ -10,6 +10,37 @@ import joblib
 from seuphyx.core.oil.utils import plotly_plot
 
 
+def _load_demo_data(model):
+    data_ref = st.session_state.data_ref.copy()
+    labels = model.predict(data_ref.values)
+    data_ref = pd.concat(
+        [data_ref, pd.DataFrame({"Predicted": labels})],
+        axis=1,
+    )
+
+    demo_parts = []
+    for label in sorted(data_ref["Predicted"].unique()):
+        if label == 6:
+            continue
+        sub = data_ref[data_ref["Predicted"] == label]
+        demo_parts.append(
+            sub.sample(
+                n=min(20, len(sub)),
+                random_state=42,
+            ))
+
+    demo_data = pd.concat(demo_parts, ignore_index=True)[[
+        "FallingTime(t/s)", "BalanceVoltage(U/V)"
+    ]]
+    st.session_state.data = demo_data
+    st.session_state.data_pred = pd.DataFrame()
+    st.session_state.data_ref_pred = st.session_state.data_ref_pred_empty
+
+    oil_drop_csv = st.session_state.work_dir / "oil_drop.csv"
+    demo_data.to_csv(oil_drop_csv, index=False)
+    return len(demo_data)
+
+
 def render_tab_classify():
     # 加载预训练模型
     data_dir = st.session_state.data_dir
@@ -36,6 +67,30 @@ def render_tab_classify():
                               options=list(model_options.keys()),
                               index=0)
     model = model_options[model_name]
+
+    with st.container(border=True):
+        st.subheader("测试数据")
+        col1, col2, col3 = st.columns([1, 1, 3])
+        with col1:
+            if st.button("加载内置测试数据", use_container_width=True):
+                count = _load_demo_data(model)
+                st.success(f"已加载 {count} 个内置测试点。")
+                st.rerun()
+        with col2:
+            if st.button("清空当前数据", use_container_width=True):
+                st.session_state.data = pd.DataFrame(
+                    columns=["FallingTime(t/s)", "BalanceVoltage(U/V)"])
+                st.session_state.data_pred = pd.DataFrame()
+                oil_drop_csv = st.session_state.work_dir / "oil_drop.csv"
+                if oil_drop_csv.exists():
+                    oil_drop_csv.unlink()
+                st.rerun()
+        with col3:
+            st.caption("内置测试数据来自 `oil_drop_reference.csv`，按类别均衡抽样，用于快速验证分类和物理拟合流程。")
+
+    if st.session_state.data.empty:
+        st.info("当前还没有实验数据。请点击上方“加载内置测试数据”，或先在“数据记录”页手动录入。")
+        return
 
     if not st.session_state.data.empty:
         # 预测分类

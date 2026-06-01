@@ -74,9 +74,9 @@ def render_tab_report():
                         pdf.setFont("Song", 12)
                         y_coordinate = 720
 
-                st.sidebar.write(f"回归结果已保存到: {pdf_file}")
+                st.sidebar.write(f"物理拟合结果已保存到: {pdf_file}")
 
-                st.subheader("**符号回归得到的统一结构公式**")
+                st.subheader("**物理约束拟合得到的统一结构公式**")
                 fig = go.Figure(
                     data=[
                         go.Scatter(x=data[:, 0],
@@ -86,7 +86,10 @@ def render_tab_report():
                                    showlegend=True)
                         for label, data in grouped_data.items()
                     ] + [
-                        go.Line(x=t_line, y=y_line, name=f'符号回归-类别{label}')
+                        go.Scatter(x=t_line,
+                                   y=y_line,
+                                   mode="lines",
+                                   name=f'物理拟合-n={label}')
                         for label, (t_line, y_line, _) in
                         st.session_state['regression_results']['data'].items()
                     ],
