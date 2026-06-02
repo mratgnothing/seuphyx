@@ -213,9 +213,30 @@ seuphyx -n oil
 http://localhost:8080/seuphyx/oil
 ```
 
+## 公网部署
+
+推荐使用 Streamlit Community Cloud 免费部署本系统。
+
+部署参数：
+
+```text
+Repository: mratgnothing/seuphyx
+Branch: main
+Main file path: streamlit_app.py
+```
+
+仓库根目录的 `streamlit_app.py` 是云端入口文件，会自动加载
+`src/seuphyx/core/oil/app.py`。云端依赖使用 `requirements.txt`，已避开当前
+油滴实验主流程不需要的历史重依赖。
+
+注意：免费云平台的本地文件通常不适合长期保存学生报告和模型文件。学生生成 PDF
+后应立即下载；正式教学使用建议后续接入对象存储、数据库或校内服务器。
+
 ## 主要目录结构
 
 ```text
+streamlit_app.py             # 云端部署入口
+requirements.txt             # 云端轻量依赖
 src/seuphyx/
   cli/
     main.py                 # 命令行入口

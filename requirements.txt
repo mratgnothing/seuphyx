@@ -1,0 +1,10 @@
+streamlit
+numpy==1.26.4
+pandas
+scipy==1.14.1
+scikit-learn==1.6.1
+joblib
+sympy
+reportlab==4.4.4
+kaleido==0.1.0
+plotly==5.18.0
