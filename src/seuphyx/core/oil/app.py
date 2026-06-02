@@ -123,6 +123,47 @@ div.st-key-experiment_header .stMarkdown p {
 
 st.html(f"<style>{header_css}</style>")
 
+
+def render_workflow_status():
+    """Show the experiment workflow readiness at the top of the app."""
+    has_data = ("data" in st.session_state
+                and not st.session_state.data.empty)
+    has_classification = ("data_pred" in st.session_state
+                          and not st.session_state.data_pred.empty)
+    has_regression = "regression_results" in st.session_state
+    work_dir = st.session_state.get("work_dir")
+    has_report = bool(work_dir and list(work_dir.glob("report_*.pdf")))
+
+    steps = [
+        ("登录", True, "学生信息已登记"),
+        ("数据记录", has_data, "录入下落时间和平衡电压"),
+        ("数据分类", has_classification, "生成 AI 分类标签"),
+        ("物理拟合", has_regression, "完成整数 n 物理约束拟合"),
+        ("实验报告", has_report, "生成并下载 PDF 报告"),
+    ]
+
+    if not has_data:
+        next_step = "下一步：进入“数据记录”页，录入或加载实验数据。"
+    elif not has_classification:
+        next_step = "下一步：进入“数据分类”页，选择模型并完成分类。"
+    elif not has_regression:
+        next_step = "下一步：进入“物理拟合”页，执行物理约束聚类与拟合。"
+    elif not has_report:
+        next_step = "下一步：进入“打印报告”页，生成实验报告。"
+    else:
+        next_step = "本次实验流程已完成。"
+
+    with st.container(border=True):
+        st.markdown("#### 实验流程")
+        cols = st.columns(len(steps))
+        for idx, (label, done, help_text) in enumerate(steps, start=1):
+            status = "完成" if done else "待完成"
+            with cols[idx - 1]:
+                st.metric(f"{idx}. {label}", status)
+                st.caption(help_text)
+        st.info(next_step)
+
+
 with st.container(key="experiment_header"):
     col1, col2 = st.columns([3, 2])
     with col1:
@@ -189,6 +230,8 @@ else:
 
         st.sidebar.subheader("已保存的数据点：")
         st.sidebar.dataframe(st.session_state.data)
+
+    render_workflow_status()
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         ["1. 数据记录", "2. 训练模型（选做）", "3. 数据分类", "4. 物理拟合", "5. 视觉测量", "6. 打印报告"])
