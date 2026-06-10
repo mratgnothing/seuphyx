@@ -1,230 +1,871 @@
 """
-Tab 4: 物理约束拟合
+Tab 4: AI discovery-based charge clustering and fitting.
 """
 # built-in
 from pathlib import Path
 
 # third-party
-import plotly.graph_objects as go
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+import streamlit as st
 import sympy as sp
 
 # seuphyx
 from seuphyx.core.oil.tabs.regression import (
-    PhysicsRegressionConfig,
-    physics_guided_regression,
+    CHARGE_CENTER_COL,
+    CHARGE_CLUSTER_COL,
+    CHARGE_DISTANCE_COL,
+    CHARGE_HALF_WIDTH_COL,
+    CHARGE_UNIT_COL,
+    DISCOVERY_QUALITY_COL,
+    DiscoveryRegressionConfig,
+    SOURCE_COL,
+    TIME_COL,
+    USE_FOR_FIT_COL,
+    VOLTAGE_COL,
+    add_charge_estimates,
+    discovery_regression,
 )
-from seuphyx.core.oil.utils import plotly_plot
 import seuphyx
 
 
-TIME_COL = "FallingTime(t/s)"
-VOLTAGE_COL = "BalanceVoltage(U/V)"
-PREDICTED_COL = "Predicted"
+RESULT_VERSION = "q-final-peaks-v7"
 
 
-def _plot_physics_clusters(result):
+def _load_reference_data() -> pd.DataFrame:
+    root_reference = Path.cwd() / "oil_drop_reference.csv"
+    data_dir = Path(seuphyx.__file__).parent / "data"
+    reference_file = (
+        root_reference if root_reference.exists()
+        else data_dir / "oil_drop_reference.csv")
+    data_ref = pd.read_csv(reference_file).dropna(subset=[TIME_COL, VOLTAGE_COL])
+    data_ref[SOURCE_COL] = f"测试数据:{reference_file.name}"
+    return data_ref
+
+
+def _build_analysis_data(include_reference: bool) -> pd.DataFrame:
+    data_parts = []
+    user_data = st.session_state.data.copy()
+    if not user_data.empty:
+        user_data[SOURCE_COL] = "实验数据"
+        data_parts.append(user_data)
+    if include_reference:
+        data_parts.append(_load_reference_data())
+    if not data_parts:
+        return pd.DataFrame(columns=[TIME_COL, VOLTAGE_COL, SOURCE_COL])
+    return pd.concat(data_parts, axis=0, ignore_index=True)
+
+
+def _plot_measurement_to_charge(data: pd.DataFrame,
+                                config: DiscoveryRegressionConfig):
+    try:
+        charged = add_charge_estimates(data, config)
+    except Exception:
+        return
+    sample = charged[[TIME_COL, VOLTAGE_COL, CHARGE_UNIT_COL]].head(8)
+
+    with st.container(border=True):
+        st.subheader("从宏观读数得到电荷估计")
+        cols = st.columns(4)
+        cols[0].metric("计时距离/mm", f"{config.fall_distance_mm:.2f}")
+        cols[1].metric("极板间距/mm", f"{config.plate_distance_mm:.2f}")
+        cols[2].metric("有效数据点", len(charged))
+        cols[3].metric("q 中位数/1e-19C",
+                       f"{charged[CHARGE_UNIT_COL].median():.3f}")
+        st.dataframe(sample, use_container_width=True, hide_index=True)
+
+
+def _plot_charge_density(result: dict):
+    clusters = result["clusters"]
+    q_values = clusters[CHARGE_UNIT_COL].dropna()
+    if q_values.empty:
+        return
+
+    peaks = result.get("peaks", [])
+    if peaks:
+        left = min(peak["center"] - 2.2 * peak["half_width"] for peak in peaks)
+        right = max(peak["center"] + 2.2 * peak["half_width"] for peak in peaks)
+        plot_min = 0.0 if left < 1.0 else max(0.0, left)
+        plot_max = max(10.0, right)
+    else:
+        plot_min, plot_max = np.percentile(q_values, [1, 95])
+        plot_max = min(max(10.0, plot_max), 12.0)
+    visible_q = q_values[(q_values >= plot_min) & (q_values <= plot_max)]
+    hidden_count = int(len(q_values) - len(visible_q))
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Histogram(
+            x=visible_q,
+            histnorm="probability density",
+            xbins=dict(start=plot_min, end=plot_max, size=0.12),
+            name="q 分布",
+            marker_color="rgba(54, 105, 163, 0.42)",
+        ))
+
+    density = result.get("density", {})
+    grid = density.get("grid", np.array([]))
+    kde_values = density.get("density", np.array([]))
+    if len(grid) and len(kde_values):
+        fig.add_trace(
+            go.Scatter(
+                x=grid,
+                y=kde_values,
+                mode="lines",
+                name="KDE 密度",
+                line=dict(color="#0f3d5e", width=3),
+            ))
+
+    palette = px.colors.qualitative.Dark24
+    for idx, peak in enumerate(peaks):
+        center = peak["center"]
+        half_width = peak["half_width"]
+        color = palette[idx % len(palette)]
+        fig.add_vrect(
+            x0=center - half_width,
+            x1=center + half_width,
+            fillcolor=color,
+            opacity=0.12,
+            line_width=0,
+        )
+        fig.add_vline(
+            x=center,
+            line_color=color,
+            line_width=2,
+            line_dash="dash",
+            annotation_text=f"峰{peak['cluster']}",
+            annotation_position="top",
+        )
+
+    fig.update_layout(
+        title="q 分布中的最终峰与半峰宽有效区间",
+        xaxis_title="电荷估计 q / 1e-19 C",
+        yaxis_title="概率密度",
+        bargap=0.04,
+        margin=dict(l=60, r=30, t=60, b=60),
+    )
+    fig.update_xaxes(range=[plot_min, plot_max], autorange=False)
+    st.plotly_chart(fig, key="charge_density_plot_final_peaks",
+                    use_container_width=True)
+    if hidden_count > 0:
+        st.caption(
+            f"图中只显示最终峰附近的数据；{hidden_count} 个长尾或半峰宽外点未进入该视窗，但仍保留在明细表中。")
+
+
+def _plot_spacing_discovery(result: dict):
+    spacing = result.get("spacing", {})
+    centers = spacing.get("centers_1e19C")
+    fitted = spacing.get("equal_spacing_fit_1e19C")
+    gaps = spacing.get("gaps_1e19C")
+    if centers is None or len(centers) < 2:
+        return
+    peak_rank = np.arange(1, len(centers) + 1)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=peak_rank,
+            y=centers,
+            mode="markers+lines+text",
+            name="发现的 q 峰中心",
+            text=[f"{value:.2f}" for value in centers],
+            textposition="top center",
+            marker=dict(size=11),
+            line=dict(width=2),
+        ))
+    fig.add_trace(
+        go.Scatter(
+            x=peak_rank,
+            y=fitted,
+            mode="lines",
+            name="等间距后验检验",
+            line=dict(width=3, dash="dash"),
+        ))
+
+    if gaps is not None:
+        for idx, gap in enumerate(gaps, start=1):
+            fig.add_annotation(
+                x=idx + 0.5,
+                y=(centers[idx - 1] + centers[idx]) / 2,
+                text=f"间距 {gap:.2f}",
+                showarrow=False,
+                yshift=-28,
+                font=dict(size=12),
+            )
+
+    fig.update_layout(
+        title="从峰中心后验发现共同电荷间距",
+        xaxis_title="发现峰序号（按 q 从小到大排序）",
+        yaxis_title="峰中心 q / 1e-19 C",
+        xaxis=dict(dtick=1),
+        margin=dict(l=60, r=30, t=60, b=60),
+    )
+    st.plotly_chart(fig, key="charge_spacing_plot", use_container_width=True)
+
+
+def _plot_discovered_curves(result: dict):
     clustered = result["clusters"]
     fig = go.Figure()
+    palette = px.colors.qualitative.Dark24
 
-    fit_data = clustered[clustered["UseForFit"]]
-    for n_value in sorted(fit_data["PhysicsN"].dropna().unique()):
-        sub = fit_data[fit_data["PhysicsN"] == n_value]
+    fit_data = clustered[clustered[USE_FOR_FIT_COL]]
+    for idx, cluster_id in enumerate(
+            sorted(fit_data[CHARGE_CLUSTER_COL].dropna().unique())):
+        sub = fit_data[fit_data[CHARGE_CLUSTER_COL] == cluster_id]
         fig.add_trace(
             go.Scatter(
                 x=sub[TIME_COL],
                 y=sub[VOLTAGE_COL],
                 mode="markers",
-                name=f"n={int(n_value)} 高置信点",
-                marker=dict(size=9),
+                name=f"q峰{int(cluster_id)} 高置信点",
+                marker=dict(size=8, color=palette[idx % len(palette)]),
             ))
 
-    outliers = clustered[~clustered["UseForFit"]]
+    outliers = clustered[~clustered[USE_FOR_FIT_COL]]
     if not outliers.empty:
         fig.add_trace(
             go.Scatter(
                 x=outliers[TIME_COL],
                 y=outliers[VOLTAGE_COL],
                 mode="markers",
-                name="未参与拟合点",
-                marker=dict(size=7, color="rgba(120,120,120,0.55)"),
+                name="半峰宽外数据",
+                marker=dict(size=6, color="rgba(120,120,120,0.55)"),
             ))
 
-    for n_value, (t_line, y_line, _) in result["data"].items():
+    for idx, (cluster_id, (t_line, y_line, _)) in enumerate(
+            result["data"].items()):
         fig.add_trace(
             go.Scatter(
                 x=t_line,
                 y=y_line,
                 mode="lines",
-                name=f"物理拟合 n={n_value}",
-                line=dict(width=3),
+                name=f"共享公式曲线 q峰{cluster_id}",
+                line=dict(width=3, color=palette[(idx + 8) % len(palette)]),
             ))
 
     fig.update_layout(
-        title="整数 n 物理聚类与受约束拟合",
-        xaxis_title="下落时间 (t/s)",
-        yaxis_title="平衡电压 (U/V)",
+        title="AI 发现的 q 峰在 U-t 平面中的多曲线结构",
+        xaxis_title="下落时间 t / s",
+        yaxis_title="平衡电压 U / V",
         font=dict(family="DejaVu Serif", size=16),
         margin=dict(l=60, r=30, t=60, b=60),
     )
-    st.plotly_chart(fig, key="physics_regression_plot", use_container_width=True)
+    st.plotly_chart(fig, key="discovery_curve_plot", use_container_width=True)
 
 
-def _plot_integer_distribution(result):
+def _render_result_summary(result: dict):
+    params = result["global_params"]
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("发现 q 峰数", params["cluster_count"])
+    col2.metric("共同间距/1e-19C", f"{params['spacing_1e19C']:.4f}")
+    col3.metric("公式 R2", f"{params['formula_r2']:.4f}")
+    col4.metric("参与拟合点数", params["fit_points"])
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("t 幂指数 beta", f"{params['time_power']:.2f}")
+    col2.metric("Q_c 幂指数 alpha", f"{params['charge_power']:.2f}")
+    col3.metric("公式 RMSE/V", f"{params['formula_rmse']:.3f}")
+    method_names = {
+        "neural_teacher_distillation": "神经网络蒸馏",
+        "two_stage": "两阶段发现",
+        "global_candidate_search": "全局候选搜索",
+    }
+    method_label = method_names.get(params.get("discovery_method"), "")
+    col4.metric("公式来源", method_label)
+
+    st.subheader("共享符号表达式")
+    st.caption("这里的 Q_c 是从 q 分布中发现的峰中心，单位为 1e-19 C；公认元电荷没有参与聚类或拟合。若公式来源为神经网络蒸馏，符号式是对 AI teacher 的可解释压缩。")
+    st.latex(rf"U(t,Q_c) = {sp.latex(result['symbolic_expression'])}")
+
+
+def _render_ai_workflow(result: dict):
+    params = result["global_params"]
     clustered = result["clusters"]
-    n_float = clustered["PhysicsNFloat"].dropna()
-    if n_float.empty:
+    peaks = result.get("peaks", [])
+    spacing = result.get("spacing", {})
+    two_stage = result.get("two_stage", {})
+
+    stability_values = [
+        peak.get("stability_percent") for peak in peaks
+        if np.isfinite(peak.get("stability_percent", np.nan))
+    ]
+    stability = np.mean(stability_values) if stability_values else np.nan
+    beta = params.get("time_power", np.nan)
+    alpha = params.get("charge_power", np.nan)
+    method = params.get("discovery_method", "")
+    method_text = "NN蒸馏" if method == "neural_teacher_distillation" else "符号搜索"
+
+    steps = [
+        {
+            "step": "U,t",
+            "value": f"{len(clustered)}点",
+            "detail": "原始复杂读数",
+        },
+        {
+            "step": "q估计",
+            "value": f"{clustered[CHARGE_UNIT_COL].median():.2f}",
+            "detail": "连续电荷分布",
+        },
+        {
+            "step": "无监督峰",
+            "value": f"{params['cluster_count']}峰",
+            "detail": "不预设整数倍",
+        },
+        {
+            "step": "半峰宽",
+            "value": f"{params['fit_points']}点",
+            "detail": "高置信数据",
+        },
+        {
+            "step": "稳定性",
+            "value": f"{stability:.0f}%" if np.isfinite(stability) else "-",
+            "detail": "重采样复现",
+        },
+        {
+            "step": "符号发现",
+            "value": f"{method_text}",
+            "detail": f"α={alpha:.2f}, β={beta:.2f}",
+        },
+    ]
+
+    with st.container(border=True):
+        st.subheader("AI 数据处理路径")
+        fig = go.Figure()
+        x_values = np.arange(len(steps))
+        fig.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=np.zeros(len(steps)),
+                mode="lines+markers+text",
+                marker=dict(size=34, color="#25636f"),
+                line=dict(width=3, color="#8ab6bd"),
+                text=[item["step"] for item in steps],
+                textposition="top center",
+                customdata=np.array(
+                    [[item["value"], item["detail"]] for item in steps]),
+                hovertemplate="%{text}<br>%{customdata[0]}<br>%{customdata[1]}<extra></extra>",
+            ))
+        for idx, item in enumerate(steps):
+            fig.add_annotation(
+                x=idx,
+                y=-0.28,
+                text=f"{item['value']}<br>{item['detail']}",
+                showarrow=False,
+                align="center",
+                font=dict(size=13),
+            )
+        fig.update_layout(
+            height=230,
+            margin=dict(l=20, r=20, t=50, b=60),
+            xaxis=dict(visible=False, range=[-0.4, len(steps) - 0.6]),
+            yaxis=dict(visible=False, range=[-0.55, 0.35]),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, key="ai_discovery_workflow_v1",
+                        use_container_width=True)
+        neural = result.get("neural_teacher", {})
+        if neural:
+            metrics = neural.get("teacher_metrics", {})
+            st.caption(
+                f"AI teacher 使用 {metrics.get('model_count', 0)} 个 MLP 组成集成，在留出测试集上的 RMSE 为 {metrics.get('test_rmse', np.nan):.2f} V；最终公式是对神经网络平滑曲面的符号蒸馏。")
+        elif two_stage:
+            time_candidates = two_stage.get("time_stage_candidates",
+                                            pd.DataFrame())
+            coefficient_candidates = two_stage.get(
+                "coefficient_stage_candidates", pd.DataFrame())
+            time_count = len(
+                time_candidates) if isinstance(time_candidates,
+                                               pd.DataFrame) else 0
+            coefficient_count = len(
+                coefficient_candidates) if isinstance(
+                    coefficient_candidates, pd.DataFrame) else 0
+            st.caption(
+                f"符号发现没有指定正确公式；系统比较了 {time_count} 个共同 t 指数候选和 {coefficient_count} 个 Q_c 幂关系候选，并在误差接近时优先选择更简洁的有理幂。")
+
+
+def _plot_neural_teacher(result: dict):
+    neural = result.get("neural_teacher", {})
+    if not neural:
+        st.info("神经网络 teacher 未启用或训练失败，本次结果回退到传统符号发现。")
         return
 
-    max_n = result["global_params"]["max_n"]
-    plot_max_n = min(10, max(10, max_n + 1))
-    n_float_visible = n_float[(n_float >= 0) & (n_float <= plot_max_n)]
+    metrics = neural.get("teacher_metrics", {})
+    teacher_points = neural.get("teacher_points", pd.DataFrame())
+    candidates = neural.get("candidate_models", pd.DataFrame())
+
+    with st.container(border=True):
+        st.subheader("神经网络辅助去噪与符号蒸馏")
+        st.caption(
+            "神经网络不直接给出物理结论，而是先学习噪声数据中的平滑 U=f(t,Q_c) 关系；符号回归再把这个 AI teacher 压缩成可解释公式。")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("AI模型", metrics.get("model", "MLP"))
+        col2.metric("集成数量", metrics.get("model_count", 0))
+        col3.metric("测试RMSE/V", f"{metrics.get('test_rmse', np.nan):.2f}")
+        col4.metric("测试R2", f"{metrics.get('test_r2', np.nan):.3f}")
+
+        if not teacher_points.empty:
+            fig = go.Figure()
+            clustered = result["clusters"]
+            fit_data = clustered[clustered[USE_FOR_FIT_COL]]
+            palette = px.colors.qualitative.Dark24
+            for idx, cluster_id in enumerate(
+                    sorted(fit_data[CHARGE_CLUSTER_COL].dropna().unique())):
+                raw = fit_data[fit_data[CHARGE_CLUSTER_COL] == cluster_id]
+                teacher = teacher_points[
+                    teacher_points["cluster"] == int(cluster_id)]
+                color = palette[idx % len(palette)]
+                fig.add_trace(
+                    go.Scatter(
+                        x=raw[TIME_COL],
+                        y=raw[VOLTAGE_COL],
+                        mode="markers",
+                        name=f"峰{int(cluster_id)} 原始高置信点",
+                        marker=dict(size=5, color=color, opacity=0.35),
+                    ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=teacher[TIME_COL],
+                        y=teacher["TeacherVoltage(U/V)"],
+                        mode="lines",
+                        name=f"峰{int(cluster_id)} AI平滑曲线",
+                        line=dict(width=3, color=color),
+                    ))
+            fig.update_layout(
+                title="AI teacher 对多条 U-t 曲线的平滑学习",
+                xaxis_title="下落时间 t / s",
+                yaxis_title="平衡电压 U / V",
+                margin=dict(l=60, r=30, t=60, b=60),
+            )
+            st.plotly_chart(fig, key="neural_teacher_curve_plot_v1",
+                            use_container_width=True)
+
+        if not candidates.empty:
+            role_mask = (
+                candidates["role"] != ""
+                if "role" in candidates.columns
+                else pd.Series(False, index=candidates.index))
+            selected_mask = (
+                candidates["selected"]
+                if "selected" in candidates.columns
+                else pd.Series(False, index=candidates.index))
+            keep_indices = list(
+                dict.fromkeys(
+                    list(candidates.head(5).index) +
+                    list(candidates[role_mask | selected_mask].index)))
+            display = candidates.loc[keep_indices].copy()
+            display.insert(0, "rank", np.arange(1, len(display) + 1))
+            st.markdown("**AI teacher 蒸馏出的候选公式**")
+            for _, row in display.iterrows():
+                with st.container(border=True):
+                    role_names = {
+                        "lowest_error": "最低误差经验式",
+                        "simple_main_law": "简洁主规律式",
+                        "pareto_simple": "Pareto简洁式",
+                    }
+                    role = role_names.get(row.get("role", ""), "")
+                    selected = " · 主推" if bool(row.get("selected", False)) else ""
+                    role_label = f" · {role}" if role else ""
+                    st.markdown(
+                        f"候选 {int(row['rank'])}{selected}{role_label} · `{row['family']}` · "
+                        f"RMSE `{row['rmse']:.3f} V` · R² `{row['r2']:.4f}`")
+                    st.latex(rf"U(t,Q_c) = {row['latex']}")
+
+
+def _plot_peak_stability(result: dict):
+    summary = result.get("peak_summary", pd.DataFrame())
+    if summary.empty or "stability(%)" not in summary.columns:
+        return
+    display = summary.copy()
     fig = go.Figure()
     fig.add_trace(
-        go.Histogram(
-            x=n_float_visible,
-            xbins=dict(start=0, end=plot_max_n, size=0.1),
-            name="n 估计值分布",
+        go.Bar(
+            x=[f"峰{int(value)}" for value in display["cluster"]],
+            y=display["stability(%)"],
+            name="重采样稳定性",
+            marker_color="#2a7f78",
+            customdata=np.stack(
+                [
+                    display["Q_center(1e-19C)"].round(3).astype(str),
+                    display["points"].astype(str),
+                ],
+                axis=-1,
+            ),
+            hovertemplate=(
+                "%{x}<br>稳定性=%{y:.1f}%<br>"
+                "Q中心=%{customdata[0]}<br>"
+                "半峰宽内点数=%{customdata[1]}<extra></extra>"),
         ))
-    for n_value in range(1, min(max_n, plot_max_n) + 1):
-        fig.add_vline(x=n_value, line_dash="dash", line_color="#333333")
-
     fig.update_layout(
-        title="物理变换后的整数 n 峰值分布",
-        xaxis_title="n_float = A / ((U-b) * t^(3/2))",
-        yaxis_title="数据点数量",
-        xaxis=dict(range=[0, plot_max_n], dtick=1),
-        bargap=0.08,
+        title="q 峰的重采样稳定性",
+        xaxis_title="发现的 q 峰",
+        yaxis_title="bootstrap 中被再次发现的比例/%",
+        yaxis=dict(range=[0, 105]),
         margin=dict(l=60, r=30, t=60, b=60),
     )
-    st.plotly_chart(fig, key="integer_n_distribution", use_container_width=True)
+    st.plotly_chart(fig, key="peak_stability_plot_v1",
+                    use_container_width=True)
+
+
+def _plot_two_stage_discovery(result: dict):
+    two_stage = result.get("two_stage", {})
+    if not two_stage:
+        return
+
+    time_candidates = two_stage.get("time_stage_candidates", pd.DataFrame())
+    coefficient_candidates = two_stage.get("coefficient_stage_candidates",
+                                           pd.DataFrame())
+    coefficient_df = two_stage.get("cluster_coefficients", pd.DataFrame())
+    if not isinstance(time_candidates, pd.DataFrame) or time_candidates.empty:
+        return
+
+    st.subheader("两阶段符号发现的中间结果")
+    st.caption(
+        "第一阶段让每个 q 峰有独立系数，只共同搜索 t 的幂指数；第二阶段再让这些系数作为样本，搜索它们与 Q_c 的幂关系。")
+
+    fig = go.Figure()
+    ordered = time_candidates.sort_values("time_power")
+    fig.add_trace(
+        go.Scatter(
+            x=ordered["time_power"],
+            y=ordered["rmse"],
+            mode="lines+markers",
+            name="共同 t 指数候选",
+            line=dict(color="#1f5d78", width=2),
+            marker=dict(size=7),
+            customdata=np.stack(
+                [
+                    ordered["r2"].round(4).astype(str),
+                    ordered["bic"].round(1).astype(str),
+                ],
+                axis=-1,
+            ),
+            hovertemplate=(
+                "β=%{x:.3f}<br>RMSE=%{y:.3f} V<br>"
+                "R²=%{customdata[0]}<br>BIC=%{customdata[1]}<extra></extra>"),
+        ))
+    selected_time = (
+        time_candidates[time_candidates["selected"]]
+        if "selected" in time_candidates.columns else pd.DataFrame())
+    best_time = (
+        selected_time.iloc[0] if not selected_time.empty
+        else time_candidates.iloc[0])
+    fig.add_vline(
+        x=float(best_time["time_power"]),
+        line_width=2,
+        line_dash="dash",
+        line_color="#d45a38",
+        annotation_text=f"最佳 β={best_time['time_power']:.2f}",
+    )
+    fig.update_layout(
+        title="阶段一：多条 q 峰曲线共同搜索时间幂指数",
+        xaxis_title="候选 β",
+        yaxis_title="RMSE / V",
+        margin=dict(l=60, r=30, t=60, b=60),
+    )
+    st.plotly_chart(fig, key="time_power_stage_plot_v1",
+                    use_container_width=True)
+
+    if not isinstance(coefficient_candidates,
+                      pd.DataFrame) or coefficient_candidates.empty:
+        return
+    if not isinstance(coefficient_df, pd.DataFrame) or coefficient_df.empty:
+        return
+
+    selected_coeff = (
+        coefficient_candidates[coefficient_candidates["selected"]]
+        if "selected" in coefficient_candidates.columns else pd.DataFrame())
+    coeff_best = (
+        selected_coeff.iloc[0] if not selected_coeff.empty
+        else coefficient_candidates.iloc[0])
+    q_min = float(coefficient_df["Q_center(1e-19C)"].min())
+    q_max = float(coefficient_df["Q_center(1e-19C)"].max())
+    q_line = np.linspace(q_min, q_max, 200)
+    y_line = float(coeff_best["amplitude"]) * np.power(
+        q_line, float(coeff_best["charge_power"]))
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=coefficient_df["Q_center(1e-19C)"],
+            y=coefficient_df["time_coefficient"],
+            mode="markers+text",
+            text=[f"峰{int(value)}" for value in coefficient_df["cluster"]],
+            textposition="top center",
+            name="阶段一得到的各峰系数",
+            marker=dict(size=13, color="#d45a38"),
+        ))
+    fig.add_trace(
+        go.Scatter(
+            x=q_line,
+            y=y_line,
+            mode="lines",
+            name=f"系数 ≈ A·Q_c^{coeff_best['charge_power']:.2f}",
+            line=dict(width=3, color="#234f6c"),
+        ))
+    fig.update_layout(
+        title="阶段二：从各峰系数发现 Q_c 幂关系",
+        xaxis_title="峰中心 Q_c / 1e-19 C",
+        yaxis_title="阶段一曲线系数",
+        margin=dict(l=60, r=30, t=60, b=60),
+    )
+    st.plotly_chart(fig, key="charge_coefficient_stage_plot_v1",
+                    use_container_width=True)
+
+
+def _plot_symbolic_candidates(result: dict):
+    candidates = result.get("candidate_models", pd.DataFrame())
+    if candidates.empty:
+        return
+
+    display = candidates.head(8).copy()
+    display.insert(0, "rank", np.arange(1, len(display) + 1))
+    display["label"] = display.apply(
+        lambda row: (
+            f"候选{int(row['rank'])} | {row['family']} | "
+            f"α={row['charge_power']:.2f}, β={row['time_power']:.2f}"),
+        axis=1,
+    )
+    display["metric_label"] = display.apply(
+        lambda row: f"RMSE {row['rmse']:.2f} V · R² {row['r2']:.3f}",
+        axis=1,
+    )
+
+    st.subheader("全局候选式搜索对照")
+    st.caption("这些候选式直接在所有高置信点上搜索，作为两阶段发现结果的对照。RMSE 越低越好；BIC 会同时惩罚误差和公式复杂度。")
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=display["rmse"],
+            y=display["label"],
+            mode="markers+text",
+            text=display["metric_label"],
+            textposition="middle right",
+            marker=dict(
+                size=14,
+                color=display["bic"],
+                colorscale="Teal",
+                showscale=True,
+                colorbar=dict(title="BIC"),
+            ),
+            customdata=np.stack(
+                [
+                    display["mae"].round(3).astype(str),
+                    display["bic"].round(1).astype(str),
+                ],
+                axis=-1,
+            ),
+            hovertemplate=(
+                "%{y}<br>RMSE=%{x:.3f} V<br>"
+                "MAE=%{customdata[0]} V<br>"
+                "BIC=%{customdata[1]}<extra></extra>"),
+        ))
+    fig.update_layout(
+        title="候选符号表达式误差比较",
+        xaxis_title="RMSE / V",
+        yaxis_title="候选式结构",
+        yaxis=dict(autorange="reversed"),
+        margin=dict(l=260, r=140, t=60, b=60),
+        height=max(420, 62 * len(display)),
+    )
+    st.plotly_chart(fig, key="symbolic_candidate_plot_readable_v2",
+                    use_container_width=True)
+
+    st.markdown("**候选公式（数学排版）**")
+    for _, row in display.iterrows():
+        with st.container(border=True):
+            st.markdown(
+                f"候选 {int(row['rank'])} · `{row['family']}` · "
+                f"RMSE `{row['rmse']:.3f} V` · R² `{row['r2']:.4f}` · "
+                f"BIC `{row['bic']:.1f}`")
+            st.latex(rf"U(t,Q_c) = {row['latex']}")
+
+    cols = [
+        "rank",
+        "family",
+        "charge_power",
+        "time_power",
+        "rmse",
+        "mae",
+        "r2",
+        "bic",
+    ]
+    st.dataframe(display[cols], use_container_width=True, hide_index=True)
 
 
 def render_tab_regress():
-    if 'data_pred' not in st.session_state:
-        st.info("请先在“数据分类”页面完成分类，再进行物理约束拟合。")
-        return
+    st.header("AI 发现式聚类与拟合")
+    st.success(
+        "界面已更新：主公式优先来自神经网络 teacher 的符号蒸馏；传统符号搜索作为对照保留。")
 
-    with st.container(border=True):
-        data_dir = Path(seuphyx.__file__).parent / "data"
-        reference_file = data_dir / "oil_drop_reference.csv"
-        data_ref = pd.read_csv(reference_file)
-        data = st.session_state.data
+    has_user_data = not st.session_state.data.empty
+    if not has_user_data:
+        st.info("当前还没有录入实验数据。可以勾选参考数据先查看完整发现流程。")
 
-        data_user = data.copy()
-        data_user["Source"] = "实验数据"
-        data_ref = data_ref.copy()
-        data_ref["Source"] = "参考数据"
-        data_combined = pd.concat([data_user, data_ref], axis=0,
-                                  ignore_index=True)
-
-        labels = st.session_state.model.predict(
-            data_combined[[TIME_COL, VOLTAGE_COL]].values)
-        data_combined[PREDICTED_COL] = labels
-
-        y_pred_labels = np.unique(labels)
-        grouped_data = {}
-        for label in y_pred_labels:
-            legend = f"舍弃数据" if label == y_pred_labels[-1] else f"AI类别{label}"
-            grouped_data[legend] = data_combined[
-                data_combined[PREDICTED_COL] == label][[
-                    TIME_COL, VOLTAGE_COL
-                ]].values
-
-        plotly_plot(
-            title="机器学习初始分类散点图",
-            grouped_data=grouped_data,
-            key="classification_scatter_plot2",
-            showlegend=True,
-        )
-
-        st.session_state.data_combined = data_combined
-
-    st.subheader("物理约束聚类与拟合")
-    with st.form("physics_regression_form", border=True):
+    with st.form("discovery_regression_form", border=True):
+        st.subheader("实验参数与 AI 分析参数")
         col1, col2, col3 = st.columns(3)
         with col1:
-            max_n = st.number_input("最大 n", min_value=2, max_value=12, value=5)
+            fall_distance_mm = st.number_input("计时距离/mm",
+                                               min_value=0.10,
+                                               max_value=5.00,
+                                               value=1.45,
+                                               step=0.05)
         with col2:
-            peak_width = st.slider("整数峰半宽", 0.05, 0.60, 0.25, 0.01)
+            plate_distance_mm = st.number_input("极板间距/mm",
+                                                min_value=1.00,
+                                                max_value=10.00,
+                                                value=5.00,
+                                                step=0.10)
         with col3:
-            min_points = st.number_input("每条曲线最少点数",
-                                         min_value=2,
-                                         max_value=20,
-                                         value=3)
+            include_reference = st.checkbox("参考数据参与分析", value=True)
 
-        with st.expander("高级参数", expanded=False):
+        with st.expander("聚类与符号回归高级参数", expanded=False):
             col1, col2, col3 = st.columns(3)
             with col1:
-                initial_a = st.number_input("初始 A", value=54402.3027)
+                kde_bandwidth = st.slider(
+                    "KDE带宽",
+                    0.04,
+                    0.35,
+                    0.08,
+                    0.01,
+                    help="控制 q 分布密度曲线的平滑程度。数值越小越容易分出细峰，数值越大越容易把相邻峰合并。")
+                max_clusters = st.slider(
+                    "最多发现峰数",
+                    5,
+                    10,
+                    8,
+                    1,
+                    help="KDE 找到很多峰时，只保留显著性最高的前几个峰，避免噪声峰进入分析。")
             with col2:
-                initial_b = st.number_input("初始 b", value=-7.5)
+                peak_prominence = st.slider(
+                    "峰显著性阈值",
+                    0.005,
+                    0.100,
+                    0.020,
+                    0.005,
+                    help="峰必须比周围密度高出一定比例才被保留。数值越大，保留的峰越少。")
+                min_points = st.number_input("每个峰最少点数",
+                                             min_value=2,
+                                             max_value=30,
+                                             value=4,
+                                             help="半峰宽筛选后，每个 q 峰至少要有多少点，才进入共享公式拟合。")
             with col3:
-                residual_sigma_factor = st.slider("残差筛选强度", 1.0, 6.0,
-                                                  3.0, 0.1)
+                half_width_scale = st.slider(
+                    "半峰宽筛选系数",
+                    0.5,
+                    1.5,
+                    1.0,
+                    0.05,
+                    help="以峰的半峰宽为基础决定有效点范围。数值越大，纳入拟合的数据越多，也更容易带入离群点。")
+                analysis_upper = st.slider("峰发现主体上分位/%", 70.0, 99.0,
+                                           85.0, 1.0,
+                                           help="只用 q 分布主体区间寻找峰，长尾点保留但不参与找峰。85 表示先在前 85% 的 q 值中找主体峰。")
+                time_power_step = st.select_slider(
+                    "符号搜索步长",
+                    options=[0.10, 0.05, 0.025],
+                    value=0.05,
+                    help="搜索 t 的幂指数时的步长。步长越小越精细，但计算更慢。",
+                )
+            st.caption(
+                "参数说明：KDE 带宽控制 q 分布平滑程度；峰显著性阈值控制噪声峰过滤；半峰宽筛选系数控制哪些点算高置信点；主体上分位用于防止少数极端长尾点影响峰发现；符号搜索步长控制幂指数搜索精度。")
 
-            use_predicted_init = st.checkbox("用 AI 分类初始化 A 和 b",
-                                             value=True)
-            include_reference = st.checkbox("参考数据参与拟合", value=True)
-
-        submitted = st.form_submit_button("执行物理约束聚类与拟合",
+        submitted = st.form_submit_button("执行 AI 发现式聚类与拟合",
                                           use_container_width=True)
 
-    if submitted:
-        config = PhysicsRegressionConfig(
-            max_n=int(max_n),
-            peak_width=float(peak_width),
-            min_points_per_peak=int(min_points),
-            initial_a=float(initial_a),
-            initial_b=float(initial_b),
-            use_predicted_labels_for_init=bool(use_predicted_init),
-            residual_sigma_factor=float(residual_sigma_factor),
-        )
-        data_for_fit = data_combined if include_reference else st.session_state.data_pred
-        try:
-            result = physics_guided_regression(data_for_fit, config)
-            st.session_state.regression_results = result
-            st.session_state.data_physics_clustered = result["clusters"]
-        except Exception as exc:
-            st.error(f"物理约束拟合失败: {exc}")
+    config = DiscoveryRegressionConfig(
+        fall_distance_mm=float(fall_distance_mm),
+        plate_distance_mm=float(plate_distance_mm),
+        kde_bandwidth=float(kde_bandwidth),
+        peak_prominence=float(peak_prominence),
+        max_clusters=int(max_clusters),
+        min_points_per_cluster=int(min_points),
+        half_width_scale=float(half_width_scale),
+        analysis_upper_percentile=float(analysis_upper),
+        time_power_step=float(time_power_step),
+    )
 
-    if 'regression_results' not in st.session_state:
+    analysis_data = _build_analysis_data(include_reference)
+    if not analysis_data.empty:
+        _plot_measurement_to_charge(analysis_data, config)
+
+    if submitted:
+        if analysis_data.empty:
+            st.error("没有可用于分析的数据。请录入实验数据或勾选参考数据。")
+            return
+        try:
+            result = discovery_regression(analysis_data, config)
+            st.session_state.regression_results = result
+            st.session_state.data_discovery_clustered = result["clusters"]
+            st.success("AI 发现式聚类与拟合完成。")
+        except Exception as exc:
+            st.error(f"AI 发现式分析失败: {exc}")
+            return
+
+    if "regression_results" not in st.session_state:
         return
 
     result = st.session_state.regression_results
-    params = result["global_params"]
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("全局 A", f"{params['A']:.4f}")
-    col2.metric("全局 b", f"{params['b']:.4f}")
-    col3.metric("残差阈值/V", f"{params['residual_limit']:.2f}")
-    col4.metric("参与拟合点数",
-                int(result["clusters"]["UseForFit"].sum()))
+    if result.get("mode") != "discovery":
+        st.warning("当前会话中保存的是旧版物理约束拟合结果，请重新执行 AI 发现式聚类与拟合。")
+        return
+    if result.get("result_version") != RESULT_VERSION:
+        st.session_state.pop("regression_results", None)
+        st.session_state.pop("data_discovery_clustered", None)
+        st.info("神经网络蒸馏逻辑已更新，请重新点击“执行 AI 发现式聚类与拟合”。")
+        return
 
-    _plot_integer_distribution(result)
-    _plot_physics_clusters(result)
+    _render_result_summary(result)
+    _render_ai_workflow(result)
+    _plot_charge_density(result)
+    _plot_peak_stability(result)
+    _plot_neural_teacher(result)
+    _plot_discovered_curves(result)
+
+    with st.expander("查看共同间距和传统符号搜索对照", expanded=False):
+        _plot_spacing_discovery(result)
+        _plot_two_stage_discovery(result)
+        _plot_symbolic_candidates(result)
 
     if not result["peak_summary"].empty:
-        st.subheader("各整数 n 的拟合结果")
+        st.subheader("发现的 q 峰与拟合质量")
         st.dataframe(result["peak_summary"], use_container_width=True)
 
-    st.subheader("拟合公式")
-    for n_value, (_, _, fitted_expr) in result["data"].items():
-        st.markdown(f"**n = {n_value}**")
-        st.latex(rf"U_{{{n_value}}}(t) = {sp.latex(fitted_expr)}")
+    with st.expander("查看候选式数值指标", expanded=False):
+        candidate_cols = [
+            "family",
+            "charge_power",
+            "time_power",
+            "b",
+            "coef1",
+            "coef2",
+            "rmse",
+            "mae",
+            "r2",
+            "bic",
+        ]
+        available_candidate_cols = [
+            col for col in candidate_cols
+            if col in result["candidate_models"].columns
+        ]
+        st.dataframe(result["candidate_models"][available_candidate_cols],
+                     use_container_width=True)
 
-    with st.expander("查看物理聚类明细", expanded=False):
+    with st.expander("查看 q 聚类明细", expanded=False):
         detail_cols = [
+            SOURCE_COL,
             TIME_COL,
             VOLTAGE_COL,
-            PREDICTED_COL,
-            "PhysicsNFloat",
-            "PhysicsN",
-            "PhysicsNDistance",
-            "PhysicsResidual(V)",
-            "UseForFit",
-            "ClusterQuality",
+            CHARGE_UNIT_COL,
+            CHARGE_CLUSTER_COL,
+            CHARGE_CENTER_COL,
+            CHARGE_DISTANCE_COL,
+            CHARGE_HALF_WIDTH_COL,
+            "SymbolicResidual(V)",
+            USE_FOR_FIT_COL,
+            DISCOVERY_QUALITY_COL,
         ]
         available_cols = [
             col for col in detail_cols if col in result["clusters"].columns
