@@ -48,9 +48,11 @@ def render_tab_vision():
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.button("开始跟踪", disabled=True, use_container_width=True)
+            if st.button("开始跟踪", use_container_width=True):
+                st.toast("视觉跟踪功能开发中，敬请期待！", icon="⏳")
         with col2:
-            st.button("结束记录", disabled=True, use_container_width=True)
+            if st.button("结束记录", use_container_width=True):
+                st.toast("视觉记录功能开发中，敬请期待！", icon="⏳")
         with col3:
             if st.button("生成记录模板", use_container_width=True):
                 st.session_state.vision_measurement_template = (
