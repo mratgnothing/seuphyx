@@ -21,17 +21,24 @@ from seuphyx.core.oil.tabs.regression import (
     CHARGE_UNIT_COL,
     DISCOVERY_QUALITY_COL,
     DiscoveryRegressionConfig,
+    PhysicsRegressionConfig,
     SOURCE_COL,
     TIME_COL,
     USE_FOR_FIT_COL,
     VOLTAGE_COL,
     add_charge_estimates,
     discovery_regression,
+    physics_guided_regression,
 )
 import seuphyx
 
 
-RESULT_VERSION = "q-final-peaks-v7"
+RESULT_VERSION = "q-ai-clustering-symbolic-v8"
+
+
+@st.cache_data(show_spinner=False)
+def _read_reference_csv(path: str) -> pd.DataFrame:
+    return pd.read_csv(path).dropna(subset=[TIME_COL, VOLTAGE_COL])
 
 
 def _load_reference_data() -> pd.DataFrame:
@@ -40,7 +47,7 @@ def _load_reference_data() -> pd.DataFrame:
     reference_file = (
         root_reference if root_reference.exists()
         else data_dir / "oil_drop_reference.csv")
-    data_ref = pd.read_csv(reference_file).dropna(subset=[TIME_COL, VOLTAGE_COL])
+    data_ref = _read_reference_csv(str(reference_file)).copy()
     data_ref[SOURCE_COL] = f"测试数据:{reference_file.name}"
     return data_ref
 
@@ -275,9 +282,62 @@ def _render_result_summary(result: dict):
     method_label = method_names.get(params.get("discovery_method"), "")
     col4.metric("公式来源", method_label)
 
-    st.subheader("共享符号表达式")
-    st.caption("这里的 Q_c 是从 q 分布中发现的峰中心，单位为 1e-19 C；公认元电荷没有参与聚类或拟合。若公式来源为神经网络蒸馏，符号式是对 AI teacher 的可解释压缩。")
+    st.subheader("机器学习—符号回归得到的共享表达式")
+    st.caption(
+        "这里的 Q_c 是从 q 分布中发现的簇中心，单位为 1e-19 C；公认元电荷没有参与聚类或拟合。"
+        "a/coef 表示由数据发现的曲线尺度，b 表示电压零点或系统偏置项；若公式来源为神经网络蒸馏，符号式是对 AI teacher 的可解释压缩。")
     st.latex(rf"U(t,Q_c) = {sp.latex(result['symbolic_expression'])}")
+
+
+def _render_physics_comparison(analysis_data: pd.DataFrame):
+    with st.expander("传统物理拟合对照检验", expanded=False):
+        st.caption(
+            "该模块保留陈鹏宇已实现的物理约束路径：先用物理公式反推浮点 N，再按整数半宽剔除并迭代修正参数。它作为精度对照，不参与前面的机器学习发现。")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            max_n = st.number_input("最大整数 N", min_value=2, max_value=12,
+                                    value=5)
+        with col2:
+            peak_width = st.slider("整数半宽", 0.05, 0.80, 0.25, 0.01)
+        with col3:
+            min_points = st.number_input("每个整数峰最少点数",
+                                         min_value=2,
+                                         max_value=20,
+                                         value=3)
+
+        if st.button("执行传统物理拟合对照", use_container_width=True):
+            try:
+                result = physics_guided_regression(
+                    analysis_data,
+                    PhysicsRegressionConfig(
+                        max_n=int(max_n),
+                        peak_width=float(peak_width),
+                        min_points_per_peak=int(min_points),
+                    ),
+                )
+            except Exception as exc:
+                st.error(f"传统物理拟合失败: {exc}")
+                return
+
+            params = result.get("global_params", {})
+            clusters = result.get("clusters", pd.DataFrame())
+            fit_points = int(clusters[USE_FOR_FIT_COL].sum()) if (
+                not clusters.empty and USE_FOR_FIT_COL in clusters) else 0
+            residual_rmse = np.nan
+            if (not clusters.empty and "PhysicsResidual(V)" in clusters
+                    and USE_FOR_FIT_COL in clusters):
+                residuals = clusters.loc[
+                    clusters[USE_FOR_FIT_COL], "PhysicsResidual(V)"].dropna()
+                if not residuals.empty:
+                    residual_rmse = float(np.sqrt(np.mean(residuals**2)))
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("A", f"{params.get('A', np.nan):.3f}")
+            col2.metric("b/V", f"{params.get('b', np.nan):.3f}")
+            col3.metric("参与点数", fit_points)
+            col4.metric("全局 RMSE/V", f"{residual_rmse:.3f}")
+            if result.get("peak_summary") is not None:
+                st.dataframe(result["peak_summary"], use_container_width=True,
+                             hide_index=True)
 
 
 def _render_ai_workflow(result: dict):
@@ -696,16 +756,24 @@ def _plot_symbolic_candidates(result: dict):
 
 
 def render_tab_regress():
-    st.header("AI 发现式聚类与拟合")
+    st.header("机器学习—符号回归")
     st.success(
-        "界面已更新：主公式优先来自神经网络 teacher 的符号蒸馏；传统符号搜索作为对照保留。")
+        "本页使用前一阶段发现的 Q 簇和半峰宽筛选结果，进行多簇联合符号回归；传统物理拟合作为对照保留。")
 
     has_user_data = not st.session_state.data.empty
     if not has_user_data:
         st.info("当前还没有录入实验数据。可以勾选参考数据先查看完整发现流程。")
 
+    clustering_result = st.session_state.get("charge_clustering_result")
+    available_clusters = []
+    if clustering_result and not clustering_result["peak_summary"].empty:
+        available_clusters = [
+            int(value) for value in
+            clustering_result["peak_summary"]["cluster"].dropna().tolist()
+        ]
+
     with st.form("discovery_regression_form", border=True):
-        st.subheader("实验参数与 AI 分析参数")
+        st.subheader("实验参数、AI 聚类参数与符号回归参数")
         col1, col2, col3 = st.columns(3)
         with col1:
             fall_distance_mm = st.number_input("计时距离/mm",
@@ -721,6 +789,32 @@ def render_tab_regress():
                                                 step=0.10)
         with col3:
             include_reference = st.checkbox("参考数据参与分析", value=True)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            clustering_method = st.selectbox(
+                "机器学习聚类方法",
+                ["K-Means", "Gaussian Mixture", "DBSCAN", "KDE 峰发现"],
+                index=0,
+            )
+        with col2:
+            requested_clusters = st.slider("预期簇数", 2, 8, 5, 1)
+        with col3:
+            half_width_abs = st.slider(
+                "半峰宽容差 / x10^-19C",
+                0.05,
+                0.80,
+                0.25,
+                0.01,
+                help="先聚类，再以该半峰宽筛选簇内偏离点；不会在聚类前删除数据。")
+
+        selected_clusters = None
+        if available_clusters:
+            selected_clusters = st.multiselect(
+                "参与符号回归的簇",
+                options=available_clusters,
+                default=available_clusters[:6],
+                help="可手动取消明显不稳定或教学上暂不讨论的 Q 簇。")
 
         with st.expander("聚类与符号回归高级参数", expanded=False):
             col1, col2, col3 = st.columns(3)
@@ -753,13 +847,11 @@ def render_tab_regress():
                                              value=4,
                                              help="半峰宽筛选后，每个 q 峰至少要有多少点，才进入共享公式拟合。")
             with col3:
-                half_width_scale = st.slider(
-                    "半峰宽筛选系数",
-                    0.5,
-                    1.5,
-                    1.0,
-                    0.05,
-                    help="以峰的半峰宽为基础决定有效点范围。数值越大，纳入拟合的数据越多，也更容易带入离群点。")
+                dbscan_eps = st.slider("DBSCAN eps", 0.05, 0.80, 0.25, 0.01)
+                dbscan_min_samples = st.number_input("DBSCAN min_samples",
+                                                     min_value=2,
+                                                     max_value=20,
+                                                     value=4)
                 analysis_upper = st.slider("峰发现主体上分位/%", 70.0, 99.0,
                                            85.0, 1.0,
                                            help="只用 q 分布主体区间寻找峰，长尾点保留但不参与找峰。85 表示先在前 85% 的 q 值中找主体峰。")
@@ -770,19 +862,31 @@ def render_tab_regress():
                     help="搜索 t 的幂指数时的步长。步长越小越精细，但计算更慢。",
                 )
             st.caption(
-                "参数说明：KDE 带宽控制 q 分布平滑程度；峰显著性阈值控制噪声峰过滤；半峰宽筛选系数控制哪些点算高置信点；主体上分位用于防止少数极端长尾点影响峰发现；符号搜索步长控制幂指数搜索精度。")
+                "参数说明：KDE 带宽控制 q 分布平滑程度；峰显著性阈值控制噪声峰过滤；半峰宽容差控制哪些点算高置信点；主体上分位用于防止少数极端长尾点影响峰发现；符号搜索步长控制幂指数搜索精度。")
 
-        submitted = st.form_submit_button("执行 AI 发现式聚类与拟合",
+        submitted = st.form_submit_button("执行机器学习—符号回归",
                                           use_container_width=True)
 
+    method_map = {
+        "K-Means": "KMeans",
+        "Gaussian Mixture": "GaussianMixture",
+        "DBSCAN": "DBSCAN",
+        "KDE 峰发现": "KDE",
+    }
     config = DiscoveryRegressionConfig(
         fall_distance_mm=float(fall_distance_mm),
         plate_distance_mm=float(plate_distance_mm),
+        clustering_method=method_map[clustering_method],
+        requested_clusters=int(requested_clusters),
+        half_width_1e19c=float(half_width_abs),
+        selected_clusters=tuple(selected_clusters)
+        if selected_clusters else None,
+        dbscan_eps=float(dbscan_eps),
+        dbscan_min_samples=int(dbscan_min_samples),
         kde_bandwidth=float(kde_bandwidth),
         peak_prominence=float(peak_prominence),
         max_clusters=int(max_clusters),
         min_points_per_cluster=int(min_points),
-        half_width_scale=float(half_width_scale),
         analysis_upper_percentile=float(analysis_upper),
         time_power_step=float(time_power_step),
     )
@@ -799,9 +903,9 @@ def render_tab_regress():
             result = discovery_regression(analysis_data, config)
             st.session_state.regression_results = result
             st.session_state.data_discovery_clustered = result["clusters"]
-            st.success("AI 发现式聚类与拟合完成。")
+            st.success("机器学习—符号回归完成。")
         except Exception as exc:
-            st.error(f"AI 发现式分析失败: {exc}")
+            st.error(f"机器学习—符号回归失败: {exc}")
             return
 
     if "regression_results" not in st.session_state:
@@ -814,7 +918,7 @@ def render_tab_regress():
     if result.get("result_version") != RESULT_VERSION:
         st.session_state.pop("regression_results", None)
         st.session_state.pop("data_discovery_clustered", None)
-        st.info("神经网络蒸馏逻辑已更新，请重新点击“执行 AI 发现式聚类与拟合”。")
+        st.info("AI 聚类与符号回归逻辑已更新，请重新点击“执行机器学习—符号回归”。")
         return
 
     _render_result_summary(result)
@@ -828,6 +932,8 @@ def render_tab_regress():
         _plot_spacing_discovery(result)
         _plot_two_stage_discovery(result)
         _plot_symbolic_candidates(result)
+
+    _render_physics_comparison(analysis_data)
 
     if not result["peak_summary"].empty:
         st.subheader("发现的 q 峰与拟合质量")

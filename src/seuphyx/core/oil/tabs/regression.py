@@ -17,7 +17,9 @@ import sympy as sp
 from scipy.optimize import least_squares
 from scipy.signal import find_peaks, peak_widths
 from scipy.stats import gaussian_kde
+from sklearn.cluster import DBSCAN
 from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.metrics import silhouette_score
 from sklearn.neural_network import MLPRegressor
@@ -56,9 +58,15 @@ class DiscoveryRegressionConfig:
     charge_unit_c: float = 1e-19
     kde_bandwidth: float = 0.08
     peak_prominence: float = 0.02
+    clustering_method: str = "KMeans"
+    requested_clusters: int | None = 5
+    dbscan_eps: float = 0.25
+    dbscan_min_samples: int = 4
     max_clusters: int = 8
     min_points_per_cluster: int = 4
+    half_width_1e19c: float | None = 0.25
     half_width_scale: float = 1.0
+    selected_clusters: tuple[int, ...] | None = None
     analysis_lower_percentile: float = 0.5
     analysis_upper_percentile: float = 85.0
     density_grid_size: int = 2500
@@ -115,6 +123,9 @@ def _interpolate_grid(grid: np.ndarray, positions: np.ndarray) -> np.ndarray:
 
 def _peak_half_widths(centers: np.ndarray, fwhm: np.ndarray,
                       config: DiscoveryRegressionConfig) -> np.ndarray:
+    if config.half_width_1e19c is not None and config.half_width_1e19c > 0:
+        return np.full(len(centers), float(config.half_width_1e19c))
+
     half_widths = []
     for idx, center in enumerate(centers):
         gaps = []
@@ -215,7 +226,10 @@ def _fallback_charge_peaks(q_values: np.ndarray,
         center = float(np.median(q_values))
         mad = np.median(np.abs(q_values - center))
         sigma = 1.4826 * mad
-        half_width = max(1.1774 * sigma, center * 0.05, 0.05)
+        if config.half_width_1e19c is not None and config.half_width_1e19c > 0:
+            half_width = float(config.half_width_1e19c)
+        else:
+            half_width = max(1.1774 * sigma, center * 0.05, 0.05)
         return ([{
             "cluster": 1,
             "center": center,
@@ -283,6 +297,213 @@ def _fallback_charge_peaks(q_values: np.ndarray,
         "density": np.array([]),
         "peaks": centers,
         "method": "KMeans",
+    }
+
+
+def _cluster_count_from_config(q_values: np.ndarray,
+                               config: DiscoveryRegressionConfig) -> int:
+    max_k = min(
+        int(config.max_clusters),
+        max(1, len(q_values) // max(int(config.min_points_per_cluster), 1)),
+    )
+    if config.requested_clusters is not None:
+        return int(np.clip(config.requested_clusters, 1, max_k))
+    return max_k
+
+
+def _best_kmeans_labels(q_values: np.ndarray,
+                        max_k: int) -> tuple[np.ndarray | None, str]:
+    if max_k < 2 or len(np.unique(np.round(q_values, 8))) < 2:
+        return None, "KMeans"
+    best_labels = None
+    best_score = -np.inf
+    for k_value in range(2, max_k + 1):
+        model = KMeans(n_clusters=k_value, n_init=20, random_state=42)
+        labels = model.fit_predict(q_values.reshape(-1, 1))
+        if len(np.unique(labels)) < 2:
+            continue
+        try:
+            score = silhouette_score(q_values.reshape(-1, 1), labels)
+        except Exception:
+            score = -np.inf
+        if score > best_score:
+            best_score = score
+            best_labels = labels
+    return best_labels, "KMeans-auto"
+
+
+def _charge_peaks_from_labels(q_values: np.ndarray, labels: np.ndarray,
+                              method: str,
+                              config: DiscoveryRegressionConfig) -> tuple[list[dict],
+                                                                          dict] | None:
+    valid_labels = [label for label in np.unique(labels) if label != -1]
+    if not valid_labels:
+        return None
+
+    centers = []
+    raw_half_widths = []
+    for label in valid_labels:
+        sub = q_values[labels == label]
+        if len(sub) < max(1, config.min_points_per_cluster):
+            continue
+        center = float(np.median(sub))
+        mad = float(np.median(np.abs(sub - center)))
+        sigma = 1.4826 * mad
+        if not np.isfinite(sigma) or sigma <= 0:
+            sigma = float(np.std(sub)) if len(sub) > 1 else 0.0
+        centers.append(center)
+        raw_half_widths.append(max(1.1774 * sigma, 0.05))
+
+    if not centers:
+        return None
+
+    order = np.argsort(centers)
+    centers = np.asarray(centers, dtype=float)[order]
+    raw_half_widths = np.asarray(raw_half_widths, dtype=float)[order]
+    half_widths = _peak_half_widths(centers, 2 * raw_half_widths, config)
+
+    peak_rows = []
+    for idx, center in enumerate(centers, start=1):
+        half_width = float(half_widths[idx - 1])
+        peak_rows.append({
+            "cluster": idx,
+            "center": float(center),
+            "density": np.nan,
+            "left_half": float(center - half_width),
+            "right_half": float(center + half_width),
+            "fwhm": float(2 * half_width),
+            "half_width": half_width,
+            "method": method,
+        })
+    return peak_rows, {
+        "grid": np.array([]),
+        "density": np.array([]),
+        "peaks": centers,
+        "method": method,
+    }
+
+
+def _ml_charge_peaks(q_values: np.ndarray,
+                     config: DiscoveryRegressionConfig) -> tuple[list[dict],
+                                                                 dict] | None:
+    method = (config.clustering_method or "KMeans").strip().lower()
+    if method in {"kde", "density", "峰发现kde"}:
+        return _kde_charge_peaks(q_values, config)
+
+    if len(q_values) < max(2, config.min_points_per_cluster):
+        return None
+    if len(np.unique(np.round(q_values, 8))) < 2:
+        return None
+
+    q_matrix = q_values.reshape(-1, 1)
+    if method in {"k-means", "kmeans", "k means"}:
+        k_value = _cluster_count_from_config(q_values, config)
+        if config.requested_clusters is None:
+            labels, label_method = _best_kmeans_labels(q_values, k_value)
+        else:
+            if k_value < 2:
+                return None
+            labels = KMeans(
+                n_clusters=k_value,
+                n_init=20,
+                random_state=42,
+            ).fit_predict(q_matrix)
+            label_method = "KMeans"
+        if labels is None:
+            return None
+        return _charge_peaks_from_labels(q_values, labels, label_method, config)
+
+    if method in {"gmm", "gaussian mixture", "gaussianmixture", "高斯混合"}:
+        k_value = _cluster_count_from_config(q_values, config)
+        if k_value < 2:
+            return None
+        labels = GaussianMixture(
+            n_components=k_value,
+            random_state=42,
+            covariance_type="full",
+            n_init=5,
+        ).fit_predict(q_matrix)
+        return _charge_peaks_from_labels(q_values, labels, "GaussianMixture",
+                                         config)
+
+    if method in {"dbscan", "density clustering"}:
+        labels = DBSCAN(
+            eps=max(float(config.dbscan_eps), 1e-6),
+            min_samples=max(int(config.dbscan_min_samples), 1),
+        ).fit_predict(q_matrix)
+        return _charge_peaks_from_labels(q_values, labels, "DBSCAN", config)
+
+    return _kde_charge_peaks(q_values, config)
+
+
+def _apply_selected_clusters(clustered: pd.DataFrame,
+                             selected_clusters: tuple[int, ...] | None
+                             ) -> pd.DataFrame:
+    if not selected_clusters:
+        return clustered
+    selected = {int(value) for value in selected_clusters}
+    result = clustered.copy()
+    has_cluster = result[CHARGE_CLUSTER_COL].notna()
+    disabled = pd.Series(False, index=result.index)
+    disabled.loc[has_cluster] = ~(
+        result.loc[has_cluster, CHARGE_CLUSTER_COL].astype(int).isin(selected)
+    )
+    result.loc[disabled, USE_FOR_FIT_COL] = False
+    result.loc[disabled, DISCOVERY_QUALITY_COL] = "cluster_disabled"
+    return result
+
+
+def charge_clustering(
+        data: pd.DataFrame,
+        config: DiscoveryRegressionConfig | None = None) -> dict:
+    """Run prior-free charge clustering without fitting a symbolic formula."""
+    config = config or DiscoveryRegressionConfig()
+    charged = add_charge_estimates(data, config)
+    q_values = _finite_charge_values(charged)
+    if len(q_values) < max(2, config.min_points_per_cluster):
+        raise ValueError("可用于聚类的正电荷估计点太少。")
+
+    peak_result = _ml_charge_peaks(q_values, config)
+    if peak_result is None:
+        peak_result = _fallback_charge_peaks(q_values, config)
+    peaks, density_info = peak_result
+    clustered, peaks = _assign_charge_clusters(charged, peaks)
+    clustered = _apply_selected_clusters(clustered, config.selected_clusters)
+    peaks = _estimate_peak_stability(q_values, peaks, config)
+    spacing = _estimate_common_spacing(peaks)
+
+    peak_summary = []
+    for peak in peaks:
+        cluster_id = int(peak["cluster"])
+        sub = clustered[
+            (clustered[CHARGE_CLUSTER_COL] == cluster_id) &
+            clustered[USE_FOR_FIT_COL]]
+        peak_summary.append({
+            "cluster": cluster_id,
+            "Q_center(1e-19C)": round(float(peak["center"]), 4),
+            "half_width(1e-19C)": round(float(peak["half_width"]), 4),
+            "stability(%)": round(float(peak.get("stability_percent")), 1)
+            if np.isfinite(peak.get("stability_percent", np.nan)) else np.nan,
+            "fit_points": int(len(sub)),
+            "nearest_points": int(peak.get("all_nearest_points", 0)),
+            "method": peak.get("method", ""),
+        })
+
+    return {
+        "result_version": "q-ai-clustering-v8",
+        "mode": "charge_clustering",
+        "density": density_info,
+        "spacing": spacing,
+        "peaks": peaks,
+        "clusters": clustered,
+        "peak_summary": pd.DataFrame(peak_summary),
+        "config": {
+            "clustering_method": config.clustering_method,
+            "requested_clusters": config.requested_clusters,
+            "half_width_1e19c": config.half_width_1e19c,
+            "dbscan_eps": config.dbscan_eps,
+            "dbscan_min_samples": config.dbscan_min_samples,
+        },
     }
 
 
@@ -1005,18 +1226,11 @@ def discovery_regression(
         config: DiscoveryRegressionConfig | None = None) -> dict:
     """Discover charge peaks first, then fit shared symbolic U(t, Q_c)."""
     config = config or DiscoveryRegressionConfig()
-    charged = add_charge_estimates(data, config)
-    q_values = _finite_charge_values(charged)
-    if len(q_values) < max(2, config.min_points_per_cluster):
-        raise ValueError("可用于分析的正电荷估计点太少。")
-
-    peak_result = _kde_charge_peaks(q_values, config)
-    if peak_result is None:
-        peak_result = _fallback_charge_peaks(q_values, config)
-    peaks, density_info = peak_result
-    clustered, peaks = _assign_charge_clusters(charged, peaks)
-    peaks = _estimate_peak_stability(q_values, peaks, config)
-    spacing = _estimate_common_spacing(peaks)
+    clustering_result = charge_clustering(data, config)
+    peaks = clustering_result["peaks"]
+    density_info = clustering_result["density"]
+    clustered = clustering_result["clusters"]
+    spacing = clustering_result["spacing"]
     symbolic = _fit_shared_symbolic_model(clustered, config)
     two_stage = _fit_two_stage_symbolic_model(clustered, peaks, config)
     neural = _fit_neural_teacher_distillation(clustered, peaks, config)
@@ -1095,11 +1309,12 @@ def discovery_regression(
         })
 
     return {
-        "result_version": "q-final-peaks-v7",
+        "result_version": "q-ai-clustering-symbolic-v8",
         "mode": "discovery",
         "regression_form": (
-            "Charge peaks are discovered from q first; the shared law is "
-            "learned in two stages: common t exponent, then Q_c dependence."),
+            "Charge clusters are discovered from q with unsupervised learning; "
+            "post-cluster half-width filtering selects high-confidence points, "
+            "then symbolic regression searches a shared interpretable law."),
         "global_params": {
             "family": best["family"],
             "discovery_method": "neural_teacher_distillation"
@@ -1130,6 +1345,9 @@ def discovery_regression(
             if np.isfinite(spacing["equal_spacing_r2"]) else np.nan,
             "fall_distance_mm": float(config.fall_distance_mm),
             "plate_distance_mm": float(config.plate_distance_mm),
+            "clustering_method": str(config.clustering_method),
+            "requested_clusters": config.requested_clusters,
+            "half_width_1e19c": config.half_width_1e19c,
             "kde_bandwidth": float(config.kde_bandwidth),
             "peak_prominence": float(config.peak_prominence),
             "analysis_lower_percentile": float(config.analysis_lower_percentile),

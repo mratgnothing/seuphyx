@@ -4,8 +4,15 @@ Tab 1: 数据记录
 # third-party
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 # seuphyx
-from seuphyx.core.oil.utils import plotly_plot
+from seuphyx.core.oil.tabs.regression import (
+    CHARGE_UNIT_COL,
+    TIME_COL,
+    VOLTAGE_COL,
+    DiscoveryRegressionConfig,
+    add_charge_estimates,
+)
 
 
 def render_tab_record():
@@ -84,21 +91,42 @@ def render_tab_record():
 
             st.rerun()
 
-    # 绘图描述
     with st.container(border=True):
-        plotly_plot(
-            title="实验数据散点图",
-            grouped_data={
-                "参考数据": st.session_state.data_ref_record.values,
-                "实验数据": st.session_state.data.values,
-            },
-            key="scatter_plot",
+        st.subheader("实验数据散点图")
+        st.caption("记录阶段只显示学生实测数据；参考数据不会在本页出现，避免提前暴露判断依据。")
+        if st.session_state.data.empty:
+            st.info("当前还没有有效实验数据。")
+            return
+
+        charged = add_charge_estimates(
+            st.session_state.data,
+            DiscoveryRegressionConfig(),
+        )
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=charged[CHARGE_UNIT_COL],
+                y=charged[VOLTAGE_COL],
+                mode="markers",
+                name="学生实测数据",
+                marker=dict(size=10, color="#d62728", opacity=0.88),
+                customdata=charged[[TIME_COL]].to_numpy(),
+                hovertemplate=(
+                    "Q=%{x:.3f} x10^-19 C<br>"
+                    "U=%{y:.2f} V<br>"
+                    "t=%{customdata[0]:.3f} s<extra></extra>"),
+            ))
+        fig.update_layout(
+            title="学生实测数据：Q-U 散点",
+            xaxis_title="电荷量 Q / x10^-19 C",
+            yaxis_title="平衡电压 U / V",
+            margin=dict(l=60, r=30, t=60, b=60),
             showlegend=True,
         )
-
-        if st.button("**显示/隐藏参考数据**"):
-            if st.session_state.data_ref_record.empty:
-                st.session_state.data_ref_record = st.session_state.data_ref
-            else:
-                st.session_state.data_ref_record = st.session_state.data_ref_empty
-            st.rerun()
+        st.plotly_chart(fig, key="student_q_scatter_plot",
+                        use_container_width=True)
+        st.dataframe(
+            charged[[TIME_COL, VOLTAGE_COL, CHARGE_UNIT_COL]],
+            use_container_width=True,
+            hide_index=True,
+        )

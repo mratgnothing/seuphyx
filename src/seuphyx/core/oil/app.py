@@ -7,12 +7,6 @@ import plotly.io as pio
 import pandas as pd
 # seuphyx
 from seuphyx.web import StreamlitConfig, login
-from seuphyx.core.oil.tabs.tab_record import render_tab_record
-from seuphyx.core.oil.tabs.tab_train import render_tab_train
-from seuphyx.core.oil.tabs.tab_classify import render_tab_classify
-from seuphyx.core.oil.tabs.tab_regress import render_tab_regress
-from seuphyx.core.oil.tabs.tab_vision import render_tab_vision
-from seuphyx.core.oil.tabs.tab_report import render_tab_report
 import seuphyx
 
 # ==== Streamlit 页面配置 ====
@@ -26,12 +20,21 @@ st.set_page_config(
     initial_sidebar_state=st.session_state.sidebar_state,
 )
 
-# 读取 logo 文件
-with open(image_dir / "seu_logo.svg", "r", encoding="utf-8") as f:
-    seu_logo_svg = f.read()
 
-with open(image_dir / "seu_phy_logo.svg", "r", encoding="utf-8") as f:
-    seu_phy_logo_svg = f.read()
+@st.cache_data(show_spinner=False)
+def _read_text_file(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+@st.cache_data(show_spinner=False)
+def _load_reference_csv(path: str) -> pd.DataFrame:
+    return pd.read_csv(path)
+
+
+# 读取 logo 文件
+seu_logo_svg = _read_text_file(str(image_dir / "seu_logo.svg"))
+seu_phy_logo_svg = _read_text_file(str(image_dir / "seu_phy_logo.svg"))
 
 css = '''
 header.stAppHeader {
@@ -129,20 +132,24 @@ def render_workflow_status():
     has_data = ("data" in st.session_state
                 and not st.session_state.data.empty)
     has_regression = "regression_results" in st.session_state
+    has_clustering = "charge_clustering_result" in st.session_state
     work_dir = st.session_state.get("work_dir")
     has_report = bool(work_dir and list(work_dir.glob("report_*.pdf")))
 
     steps = [
         ("登录", True, "学生信息已登记"),
         ("数据记录", has_data, "录入下落时间和平衡电压"),
-        ("AI发现", has_regression, "发现 q 峰并归纳共享公式"),
+        ("AI聚类", has_clustering, "从 Q 分布发现自然簇"),
+        ("符号回归", has_regression, "归纳共享可解释公式"),
         ("实验报告", has_report, "生成并下载 PDF 报告"),
     ]
 
     if not has_data:
         next_step = "下一步：进入“数据记录”页，录入或加载实验数据。"
+    elif not has_clustering:
+        next_step = "下一步：进入“数据分类”页，用无监督学习发现 Q 分布簇。"
     elif not has_regression:
-        next_step = "下一步：进入“AI发现拟合”页，执行 q 峰发现、神经网络蒸馏与共享公式拟合。"
+        next_step = "下一步：进入“机器学习—符号回归”页，选择有效簇并拟合共享公式。"
     elif not has_report:
         next_step = "下一步：进入“打印报告”页，生成实验报告。"
     else:
@@ -212,7 +219,7 @@ else:
     data_dir = Path(seuphyx.__file__).parent / "data"
     st.session_state.data_dir = data_dir
     reference_file = data_dir / "oil_drop_reference.csv"
-    st.session_state.data_ref = pd.read_csv(reference_file)
+    st.session_state.data_ref = _load_reference_csv(str(reference_file))
     st.session_state.data_ref_empty = pd.DataFrame(
         columns=["FallingTime(t/s)", "BalanceVoltage(U/V)"])
     st.session_state.data_ref_pred_empty = pd.DataFrame(
@@ -228,19 +235,36 @@ else:
 
     render_workflow_status()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "1. 数据记录",
-        "2. 传统方法对照",
-        "3. AI发现拟合",
-        "4. 视觉测量",
-        "5. 打印报告",
-    ])
+    page = st.radio(
+        "功能页面",
+        [
+            "1. 数据记录",
+            "2. 数据分类",
+            "3. 机器学习—符号回归",
+            "4. 传统方法对照",
+            "5. 视觉测量",
+            "6. 打印报告",
+        ],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="oil_active_page",
+    )
 
-    # 渲染各个 Tab
-    with tab1:
+    # Streamlit tabs 会在每次重跑时执行所有页；这里只渲染当前页来降低输入延迟。
+    if page == "1. 数据记录":
+        from seuphyx.core.oil.tabs.tab_record import render_tab_record
         render_tab_record()
-
-    with tab2:
+    elif page == "2. 数据分类":
+        from seuphyx.core.oil.tabs.tab_classify import render_tab_classify
+        render_tab_classify()
+    elif page == "3. 机器学习—符号回归":
+        from seuphyx.core.oil.tabs.tab_regress import render_tab_regress
+        render_tab_regress()
+    elif page == "4. 传统方法对照":
+        from seuphyx.core.oil.tabs.tab_classify import (
+            render_traditional_classification,
+        )
+        from seuphyx.core.oil.tabs.tab_train import render_tab_train
         st.header("传统机器学习分类对照")
         st.caption(
             "这一页保留旧流程作为对照：先训练分类器，再按 U-t 散点分类。它不再是 AI 发现式拟合的必要步骤。")
@@ -248,13 +272,10 @@ else:
         with train_tab:
             render_tab_train()
         with classify_tab:
-            render_tab_classify()
-
-    with tab3:
-        render_tab_regress()
-
-    with tab4:
+            render_traditional_classification()
+    elif page == "5. 视觉测量":
+        from seuphyx.core.oil.tabs.tab_vision import render_tab_vision
         render_tab_vision()
-
-    with tab5:
+    elif page == "6. 打印报告":
+        from seuphyx.core.oil.tabs.tab_report import render_tab_report
         render_tab_report()
