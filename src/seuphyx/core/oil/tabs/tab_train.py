@@ -42,16 +42,6 @@ from seuphyx.core.oil.utils import plotly_plot
 import seuphyx
 
 
-@st.cache_resource(show_spinner=False)
-def _load_joblib_model(path: str):
-    return joblib.load(path)
-
-
-@st.cache_data(show_spinner=False)
-def _load_reference_data(path: str) -> pd.DataFrame:
-    return pd.read_csv(path)
-
-
 def render_tab_train():
     st.header("机器学习模型训练")
     work_dir = st.session_state.work_dir
@@ -59,9 +49,9 @@ def render_tab_train():
     # 查看参考数据集
     data_dir = Path(seuphyx.__file__).parent / "data"
     model_file = data_dir / "points_svm_pipeline.joblib"
-    model = _load_joblib_model(str(model_file))
+    model = joblib.load(model_file)
     reference_file = data_dir / "oil_drop_reference.csv"
-    data_ref = _load_reference_data(str(reference_file))
+    data_ref = pd.read_csv(reference_file)
     xy_coords = data_ref.values
     y_pred_ref = model.predict(xy_coords)
     data_ref_pred = pd.concat(

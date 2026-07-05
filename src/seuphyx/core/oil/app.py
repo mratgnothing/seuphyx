@@ -1,4 +1,5 @@
 # built-in
+import os
 from datetime import datetime
 from pathlib import Path
 # third-party
@@ -225,10 +226,14 @@ else:
     st.session_state.data_ref_pred_empty = pd.DataFrame(
         columns=["FallingTime(t/s)", "BalanceVoltage(U/V)", "Predicted"])
 
-    # 显示已保存的数据点
+    # 监控主数据文件变化，支持视觉测量实时导入
+    _csv_mtime_key = "_oil_drop_csv_mtime"
     if oil_drop_csv.exists():
-        if len(st.session_state.data.values) == 0:
+        current_mtime = os.path.getmtime(oil_drop_csv)
+        last_mtime = st.session_state.get(_csv_mtime_key, 0)
+        if current_mtime > last_mtime:
             st.session_state.data = pd.read_csv(oil_drop_csv)
+            st.session_state[_csv_mtime_key] = current_mtime
 
         st.sidebar.subheader("已保存的数据点：")
         st.sidebar.dataframe(st.session_state.data)
@@ -238,11 +243,11 @@ else:
     page = st.radio(
         "功能页面",
         [
-            "1. 数据记录",
-            "2. 数据分类",
-            "3. 机器学习—符号回归",
-            "4. 传统方法对照",
-            "5. 视觉测量",
+            "1. 视觉测量",
+            "2. 数据记录",
+            "3. 数据分类",
+            "4. 机器学习—符号回归",
+            "5. 传统方法对照",
             "6. 打印报告",
         ],
         horizontal=True,
@@ -251,16 +256,19 @@ else:
     )
 
     # Streamlit tabs 会在每次重跑时执行所有页；这里只渲染当前页来降低输入延迟。
-    if page == "1. 数据记录":
+    if page == "1. 视觉测量":
+        from seuphyx.core.oil.tabs.tab_vision import render_tab_vision
+        render_tab_vision()
+    elif page == "2. 数据记录":
         from seuphyx.core.oil.tabs.tab_record import render_tab_record
         render_tab_record()
-    elif page == "2. 数据分类":
+    elif page == "3. 数据分类":
         from seuphyx.core.oil.tabs.tab_classify import render_tab_classify
         render_tab_classify()
-    elif page == "3. 机器学习—符号回归":
+    elif page == "4. 机器学习—符号回归":
         from seuphyx.core.oil.tabs.tab_regress import render_tab_regress
         render_tab_regress()
-    elif page == "4. 传统方法对照":
+    elif page == "5. 传统方法对照":
         from seuphyx.core.oil.tabs.tab_classify import (
             render_traditional_classification,
         )
@@ -273,9 +281,6 @@ else:
             render_tab_train()
         with classify_tab:
             render_traditional_classification()
-    elif page == "5. 视觉测量":
-        from seuphyx.core.oil.tabs.tab_vision import render_tab_vision
-        render_tab_vision()
     elif page == "6. 打印报告":
         from seuphyx.core.oil.tabs.tab_report import render_tab_report
         render_tab_report()
