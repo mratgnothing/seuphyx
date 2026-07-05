@@ -27,8 +27,8 @@ The teaching-first logic is:
    points and excluded/outlier points.
 5. Run multi-cluster symbolic regression on the selected high-confidence
    clusters to discover an interpretable shared law.
-6. Keep traditional integer-`N` physics-guided fitting only as a comparison
-   path.
+6. Generate the experiment report from the AI clustering and symbolic
+   regression results.
 
 Do not describe the active teaching flow as "known elementary charge first" or
 "integer multiple first". The app is designed to let students observe how AI can
@@ -38,19 +38,20 @@ discover charge grouping and a common curve law from complex experimental data.
 
 Current tabs in `app.py`:
 
-1. `数据记录`
-   - Students enter measured `t,U` values.
-   - The page shows only student-owned red Q-U scatter points.
-   - Reference data is intentionally hidden on this page so students do not see
-     the expected distribution too early.
+1. `视觉测量`
+   - Students can launch the visual measurement tool or manually enter measured
+     `t,U` values.
+   - If no measured data has been imported, downstream pages can use the root
+     `oil_drop_reference.csv` test data.
 
-2. `数据分类`
+2. `AI聚类`
    - This is now the main "机器学习—聚类分析" page.
-   - It overlays reference data as dim gray background points and highlights
-     student data in red.
-   - It first shows the raw, uncolored Q distribution.
-   - After the student clicks the AI clustering button, it colors discovered
-     clusters and marks half-width outliers.
+   - It first shows all raw `U-t` points without labels or categories.
+   - It then shows continuous `Q` estimates without assuming charge
+     quantization.
+   - After the student selects an unsupervised method and clicks the AI
+     clustering button, it colors discovered clusters and marks half-width
+     outliers.
    - It writes:
      - `st.session_state.charge_clustering_result`
      - `st.session_state.data_discovery_clustered`
@@ -63,16 +64,14 @@ Current tabs in `app.py`:
    - `RESULT_VERSION` in `tab_regress.py` must match
      `result["result_version"]` from `discovery_regression()`.
    - Current symbolic regression result version:
-     `q-ai-clustering-symbolic-v8`
+     `q-ai-clustering-symbolic-v10`
 
-4. `传统方法对照`
-   - Keeps the old supervised/semi-supervised `U-t` classifier and model
-     training workflow.
-   - Its `Predicted` labels are comparison outputs, not ground truth.
+4. `打印报告`
+   - Uses the AI clustering and symbolic regression result as the report source.
 
-5. `视觉测量`
-
-6. `打印报告`
+The old supervised/semi-supervised `U-t` classifier and integer-`N`
+physics-guided fitter are retained in code for compatibility/readability, but
+they are no longer part of the Streamlit teaching workflow.
 
 ## Session State Data Flow
 
@@ -171,7 +170,7 @@ abs(Q - nearest_center) <= half_width
      elementary charge only as a post-analysis check.
    - The accepted elementary charge is not used to create clusters.
 
-`charge_clustering()` returns `result_version = "q-ai-clustering-v8"` and
+`charge_clustering()` returns `result_version = "q-ai-clustering-v9"` and
 `mode = "charge_clustering"`.
 
 ## Symbolic Regression Logic
@@ -306,12 +305,12 @@ Those fields are not the same as `ChargeCluster` and
 
 It can generate a PDF after AI symbolic regression is complete. The report
 includes student info, total analyzed points, high-confidence points, discovered
-common charge spacing when available, shared symbolic expression, Q-cluster
-formulas, regression plot, and a saved point table with Q estimates and cluster
-labels.
+common charge spacing when available, final per-q-peak formulas, q-peak summary
+metrics, and the regression plot. It intentionally does not render or export the
+full per-point table.
 
-If Plotly/Kaleido image export fails, the PDF still keeps text and table
-content.
+If Plotly/Kaleido image export fails, the page hides the raw environment error
+and the PDF falls back to an internal lightweight plot image when possible.
 
 ## Common Pitfalls
 

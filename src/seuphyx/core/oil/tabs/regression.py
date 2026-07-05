@@ -73,6 +73,7 @@ class DiscoveryRegressionConfig:
     stability_bootstrap_samples: int = 16
     min_symbolic_points: int = 8
     symbolic_pareto_tolerance_percent: float = 1.5
+    symbolic_model_strategy: str = "auto"
     neural_teacher_models: int = 5
     time_power_min: float = -3.0
     time_power_max: float = -0.25
@@ -215,6 +216,27 @@ def _kde_charge_peaks(q_values: np.ndarray,
         "total_points": int(len(q_values)),
     }
     return peak_rows, density_info
+
+
+def _analysis_charge_window(q_values: np.ndarray,
+                            config: DiscoveryRegressionConfig
+                            ) -> tuple[float, float]:
+    lower = min(max(float(config.analysis_lower_percentile), 0.0), 40.0)
+    upper = min(max(float(config.analysis_upper_percentile), lower + 5.0),
+                99.5)
+    q_min, q_max = np.percentile(q_values, [lower, upper])
+    if not np.isfinite(q_min) or not np.isfinite(q_max) or q_max <= q_min:
+        q_min, q_max = float(np.min(q_values)), float(np.max(q_values))
+    return float(q_min), float(q_max)
+
+
+def _analysis_charge_values(q_values: np.ndarray,
+                            config: DiscoveryRegressionConfig) -> np.ndarray:
+    q_min, q_max = _analysis_charge_window(q_values, config)
+    core = q_values[(q_values >= q_min) & (q_values <= q_max)]
+    if len(core) < max(5, config.min_points_per_cluster * 2):
+        return q_values
+    return core
 
 
 def _fallback_charge_peaks(q_values: np.ndarray,
@@ -390,16 +412,17 @@ def _ml_charge_peaks(q_values: np.ndarray,
     if method in {"kde", "density", "峰发现kde"}:
         return _kde_charge_peaks(q_values, config)
 
-    if len(q_values) < max(2, config.min_points_per_cluster):
+    fit_values = _analysis_charge_values(q_values, config)
+    if len(fit_values) < max(2, config.min_points_per_cluster):
         return None
-    if len(np.unique(np.round(q_values, 8))) < 2:
+    if len(np.unique(np.round(fit_values, 8))) < 2:
         return None
 
-    q_matrix = q_values.reshape(-1, 1)
+    q_matrix = fit_values.reshape(-1, 1)
     if method in {"k-means", "kmeans", "k means"}:
-        k_value = _cluster_count_from_config(q_values, config)
+        k_value = _cluster_count_from_config(fit_values, config)
         if config.requested_clusters is None:
-            labels, label_method = _best_kmeans_labels(q_values, k_value)
+            labels, label_method = _best_kmeans_labels(fit_values, k_value)
         else:
             if k_value < 2:
                 return None
@@ -411,10 +434,11 @@ def _ml_charge_peaks(q_values: np.ndarray,
             label_method = "KMeans"
         if labels is None:
             return None
-        return _charge_peaks_from_labels(q_values, labels, label_method, config)
+        return _charge_peaks_from_labels(fit_values, labels, label_method,
+                                         config)
 
     if method in {"gmm", "gaussian mixture", "gaussianmixture", "高斯混合"}:
-        k_value = _cluster_count_from_config(q_values, config)
+        k_value = _cluster_count_from_config(fit_values, config)
         if k_value < 2:
             return None
         labels = GaussianMixture(
@@ -423,7 +447,7 @@ def _ml_charge_peaks(q_values: np.ndarray,
             covariance_type="full",
             n_init=5,
         ).fit_predict(q_matrix)
-        return _charge_peaks_from_labels(q_values, labels, "GaussianMixture",
+        return _charge_peaks_from_labels(fit_values, labels, "GaussianMixture",
                                          config)
 
     if method in {"dbscan", "density clustering"}:
@@ -431,7 +455,7 @@ def _ml_charge_peaks(q_values: np.ndarray,
             eps=max(float(config.dbscan_eps), 1e-6),
             min_samples=max(int(config.dbscan_min_samples), 1),
         ).fit_predict(q_matrix)
-        return _charge_peaks_from_labels(q_values, labels, "DBSCAN", config)
+        return _charge_peaks_from_labels(fit_values, labels, "DBSCAN", config)
 
     return _kde_charge_peaks(q_values, config)
 
@@ -490,7 +514,7 @@ def charge_clustering(
         })
 
     return {
-        "result_version": "q-ai-clustering-v8",
+        "result_version": "q-ai-clustering-v9",
         "mode": "charge_clustering",
         "density": density_info,
         "spacing": spacing,
@@ -1052,6 +1076,8 @@ def _fit_neural_teacher_distillation(clustered: pd.DataFrame,
                                      peaks: list[dict],
                                      config: DiscoveryRegressionConfig) -> dict:
     """Use a neural teacher to denoise the discovered curves, then distill it."""
+    if int(config.neural_teacher_models) <= 0:
+        return {}
     fit_data = clustered[
         clustered[USE_FOR_FIT_COL] &
         clustered[CHARGE_CLUSTER_COL].notna()].copy()
@@ -1235,9 +1261,35 @@ def discovery_regression(
     two_stage = _fit_two_stage_symbolic_model(clustered, peaks, config)
     neural = _fit_neural_teacher_distillation(clustered, peaks, config)
 
-    best = neural.get("best", two_stage.get("best", symbolic["best"]))
-    symbolic_expression = neural.get(
-        "expression", two_stage.get("expression", symbolic["expression"]))
+    strategy = getattr(config, "symbolic_model_strategy", "auto")
+    selected_method = "global_candidate_search"
+    best = symbolic["best"]
+    symbolic_expression = symbolic["expression"]
+    if strategy == "two_stage":
+        if two_stage.get("best"):
+            best = two_stage["best"]
+            symbolic_expression = two_stage["expression"]
+            selected_method = "two_stage"
+    elif strategy == "neural_teacher_distillation":
+        if neural.get("best"):
+            best = neural["best"]
+            symbolic_expression = neural["expression"]
+            selected_method = "neural_teacher_distillation"
+        elif two_stage.get("best"):
+            best = two_stage["best"]
+            symbolic_expression = two_stage["expression"]
+            selected_method = "two_stage"
+    elif strategy == "global_candidate_search":
+        selected_method = "global_candidate_search"
+    else:
+        if neural.get("best"):
+            best = neural["best"]
+            symbolic_expression = neural["expression"]
+            selected_method = "neural_teacher_distillation"
+        elif two_stage.get("best"):
+            best = two_stage["best"]
+            symbolic_expression = two_stage["expression"]
+            selected_method = "two_stage"
     fit_data = clustered[clustered[USE_FOR_FIT_COL]].copy()
     prediction = _predict_symbolic_candidate(
         best,
@@ -1309,7 +1361,7 @@ def discovery_regression(
         })
 
     return {
-        "result_version": "q-ai-clustering-symbolic-v8",
+        "result_version": "q-ai-clustering-symbolic-v10",
         "mode": "discovery",
         "regression_form": (
             "Charge clusters are discovered from q with unsupervised learning; "
@@ -1317,10 +1369,8 @@ def discovery_regression(
             "then symbolic regression searches a shared interpretable law."),
         "global_params": {
             "family": best["family"],
-            "discovery_method": "neural_teacher_distillation"
-            if neural.get("best") else
-            ("two_stage" if two_stage.get("best") else
-             "global_candidate_search"),
+            "discovery_method": selected_method,
+            "requested_symbolic_model": strategy,
             "coef1": round(float(best["coef1"]), 4),
             "coef2": round(float(best["coef2"]), 4)
             if np.isfinite(best["coef2"]) else np.nan,

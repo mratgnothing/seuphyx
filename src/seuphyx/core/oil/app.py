@@ -131,6 +131,9 @@ def render_workflow_status():
     """Show the experiment workflow readiness at the top of the app."""
     has_data = ("data" in st.session_state
                 and not st.session_state.data.empty)
+    root_reference = Path.cwd() / "oil_drop_reference.csv"
+    has_test_data = root_reference.exists()
+    has_analysis_data = has_data or has_test_data
     has_regression = "regression_results" in st.session_state
     has_clustering = "charge_clustering_result" in st.session_state
     work_dir = st.session_state.get("work_dir")
@@ -138,20 +141,22 @@ def render_workflow_status():
 
     steps = [
         ("登录", True, "学生信息已登记"),
-        ("数据记录", has_data, "录入下落时间和平衡电压"),
+        ("数据测量", has_analysis_data, "视觉测量或根目录测试数据"),
         ("AI聚类", has_clustering, "从 Q 分布发现自然簇"),
         ("符号回归", has_regression, "归纳共享可解释公式"),
         ("实验报告", has_report, "生成并下载 PDF 报告"),
     ]
 
-    if not has_data:
-        next_step = "下一步：进入“数据记录”页，录入或加载实验数据。"
+    if not has_analysis_data:
+        next_step = "下一步：进入“视觉测量”页完成测量，或检查根目录测试数据 oil_drop_reference.csv。"
+    elif not has_data:
+        next_step = "当前没有实测数据；可以直接使用根目录 oil_drop_reference.csv 进入 AI 聚类，也可以先完成视觉测量。"
     elif not has_clustering:
-        next_step = "下一步：进入“数据分类”页，用无监督学习发现 Q 分布簇。"
+        next_step = "下一步：进入“AI聚类”页，用无监督学习发现 Q 分布簇。"
     elif not has_regression:
         next_step = "下一步：进入“机器学习—符号回归”页，选择有效簇并拟合共享公式。"
     elif not has_report:
-        next_step = "下一步：进入“打印报告”页，生成实验报告。"
+        next_step = "下一步：进入“打印报告”页生成实验报告。"
     else:
         next_step = "本次实验流程已完成。"
 
@@ -218,64 +223,64 @@ else:
     # 初始化相关参数
     data_dir = Path(seuphyx.__file__).parent / "data"
     st.session_state.data_dir = data_dir
-    reference_file = data_dir / "oil_drop_reference.csv"
+    reference_file = Path.cwd() / "oil_drop_reference.csv"
     st.session_state.data_ref = _load_reference_csv(str(reference_file))
     st.session_state.data_ref_empty = pd.DataFrame(
         columns=["FallingTime(t/s)", "BalanceVoltage(U/V)"])
     st.session_state.data_ref_pred_empty = pd.DataFrame(
         columns=["FallingTime(t/s)", "BalanceVoltage(U/V)", "Predicted"])
 
-    # 显示已保存的数据点
+    # Monitor the shared CSV so visual measurement can append data out of
+    # process while the Streamlit app stays in sync.
+    _csv_mtime_key = "_oil_drop_csv_mtime"
     if oil_drop_csv.exists():
-        if len(st.session_state.data.values) == 0:
+        current_mtime = oil_drop_csv.stat().st_mtime
+        last_mtime = st.session_state.get(_csv_mtime_key, 0)
+        if current_mtime > last_mtime or len(st.session_state.data.values) == 0:
             st.session_state.data = pd.read_csv(oil_drop_csv)
+            st.session_state[_csv_mtime_key] = current_mtime
 
-        st.sidebar.subheader("已保存的数据点：")
-        st.sidebar.dataframe(st.session_state.data)
+        st.sidebar.subheader("当前测量数据")
+        st.sidebar.metric("数据点数", len(st.session_state.data))
+        with st.sidebar.expander("查看最近 20 条数据", expanded=False):
+            st.dataframe(st.session_state.data.tail(20),
+                         use_container_width=True,
+                         hide_index=True)
 
     render_workflow_status()
 
+    page_options = [
+        "1. 视觉测量",
+        "2. AI聚类",
+        "3. 机器学习—符号回归",
+        "4. 打印报告",
+    ]
+    if st.session_state.get("oil_active_page") not in (None, *page_options):
+        st.session_state.oil_active_page = page_options[0]
+
     page = st.radio(
         "功能页面",
-        [
-            "1. 数据记录",
-            "2. 数据分类",
-            "3. 机器学习—符号回归",
-            "4. 传统方法对照",
-            "5. 视觉测量",
-            "6. 打印报告",
-        ],
+        page_options,
         horizontal=True,
         label_visibility="collapsed",
         key="oil_active_page",
     )
 
     # Streamlit tabs 会在每次重跑时执行所有页；这里只渲染当前页来降低输入延迟。
-    if page == "1. 数据记录":
+    if page == "1. 视觉测量":
         from seuphyx.core.oil.tabs.tab_record import render_tab_record
-        render_tab_record()
-    elif page == "2. 数据分类":
+        from seuphyx.core.oil.tabs.tab_vision import render_tab_vision
+        vision_tab, manual_tab = st.tabs(["视觉自动测量", "手动录入"])
+        with vision_tab:
+            render_tab_vision()
+        with manual_tab:
+            render_tab_record()
+    elif page == "2. AI聚类":
         from seuphyx.core.oil.tabs.tab_classify import render_tab_classify
         render_tab_classify()
     elif page == "3. 机器学习—符号回归":
         from seuphyx.core.oil.tabs.tab_regress import render_tab_regress
         render_tab_regress()
-    elif page == "4. 传统方法对照":
-        from seuphyx.core.oil.tabs.tab_classify import (
-            render_traditional_classification,
-        )
-        from seuphyx.core.oil.tabs.tab_train import render_tab_train
-        st.header("传统机器学习分类对照")
-        st.caption(
-            "这一页保留旧流程作为对照：先训练分类器，再按 U-t 散点分类。它不再是 AI 发现式拟合的必要步骤。")
-        train_tab, classify_tab = st.tabs(["模型训练", "散点分类"])
-        with train_tab:
-            render_tab_train()
-        with classify_tab:
-            render_traditional_classification()
-    elif page == "5. 视觉测量":
-        from seuphyx.core.oil.tabs.tab_vision import render_tab_vision
-        render_tab_vision()
-    elif page == "6. 打印报告":
+    elif page == "4. 打印报告":
         from seuphyx.core.oil.tabs.tab_report import render_tab_report
         render_tab_report()

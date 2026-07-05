@@ -8,3 +8,7 @@ __pycache__/
 streamlit-*.out.log
 streamlit-*.err.log
 [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]/
+
+# temp/build outputs
+.codex_tmp/
+artifacts/
