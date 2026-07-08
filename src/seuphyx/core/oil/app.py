@@ -100,7 +100,7 @@ div.st-key-app_title div.stHeading h1 span {
 st.html(f"<style>{css}</style>")
 
 with st.container(key="app_title"):
-    st.title("人工智能(AI)辅助数据处理平台")
+    st.title("人工智能辅助数据处理平台")
 
 # 添加额外的 CSS 来实现左右对齐的 header
 header_css = '''
@@ -148,13 +148,13 @@ def render_workflow_status():
     ]
 
     if not has_analysis_data:
-        next_step = "下一步：进入“视觉测量”页完成测量，或检查根目录测试数据 oil_drop_reference.csv。"
+        next_step = "下一步：进入“视觉测量”页完成测量"
     elif not has_data:
-        next_step = "当前没有实测数据；可以直接使用根目录 oil_drop_reference.csv 进入 AI 聚类，也可以先完成视觉测量。"
+        next_step = "当前没有实测数据；可以直接使用内置数据进入 AI 聚类，也可以先完成视觉测量。"
     elif not has_clustering:
         next_step = "下一步：进入“AI聚类”页，用无监督学习发现 Q 分布簇。"
     elif not has_regression:
-        next_step = "下一步：进入“机器学习—符号回归”页，选择有效簇并拟合共享公式。"
+        next_step = "下一步：进入“机器学习—符号回归”页，选择有效簇并拟合公式。"
     elif not has_report:
         next_step = "下一步：进入“打印报告”页生成实验报告。"
     else:
@@ -253,7 +253,8 @@ else:
         "1. 视觉测量",
         "2. AI聚类",
         "3. 机器学习—符号回归",
-        "4. 打印报告",
+        "4. 后验检验与最终结果",
+        "5. 打印报告",
     ]
     if st.session_state.get("oil_active_page") not in (None, *page_options):
         st.session_state.oil_active_page = page_options[0]
@@ -281,6 +282,9 @@ else:
     elif page == "3. 机器学习—符号回归":
         from seuphyx.core.oil.tabs.tab_regress import render_tab_regress
         render_tab_regress()
-    elif page == "4. 打印报告":
+    elif page == "4. 后验检验与最终结果":
+        from seuphyx.core.oil.tabs.tab_regress import render_regression_results_page
+        render_regression_results_page()
+    elif page == "5. 打印报告":
         from seuphyx.core.oil.tabs.tab_report import render_tab_report
         render_tab_report()

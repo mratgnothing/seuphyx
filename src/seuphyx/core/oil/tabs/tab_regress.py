@@ -34,6 +34,28 @@ from seuphyx.core.oil.tabs.regression import (
 
 RESULT_VERSION = "q-ai-clustering-symbolic-v10"
 CHARGE_CLUSTERING_RESULT_VERSION = "q-ai-clustering-v9"
+CHARGE_UNIT_LABEL = "10⁻¹⁹ C"
+
+
+def _latex_two_decimals(expression) -> str:
+    replacements = {}
+    for atom in expression.atoms(sp.Float):
+        value = float(atom)
+        if np.isfinite(value):
+            replacements[atom] = sp.Float(f"{value:.2f}")
+    rounded = expression.xreplace(replacements)
+    return sp.latex(rounded)
+
+
+def _round_numeric_columns(frame: pd.DataFrame,
+                           columns: list[str],
+                           digits: int = 2) -> pd.DataFrame:
+    display = frame.copy()
+    for column in columns:
+        if column in display.columns:
+            display[column] = pd.to_numeric(
+                display[column], errors="coerce").round(digits)
+    return display
 
 
 def _config_cache_key(config: DiscoveryRegressionConfig) -> tuple:
@@ -152,12 +174,12 @@ def _plot_measurement_to_charge(data: pd.DataFrame,
 
     with st.container(border=True):
         st.subheader("输入数据概览")
-        st.caption("后续聚类只使用由 t、U 换算出的连续电荷估计 Q；这里先确认数据规模和量纲是否合理。")
+        st.caption("请确保数据规模和量纲无误。")
         cols = st.columns(4)
         cols[0].metric("计时距离/mm", f"{config.fall_distance_mm:.2f}")
         cols[1].metric("极板间距/mm", f"{config.plate_distance_mm:.2f}")
         cols[2].metric("有效数据点", len(charged))
-        cols[3].metric("q 中位数/1e-19C",
+        cols[3].metric(f"q 中位数/{CHARGE_UNIT_LABEL}",
                        f"{charged[CHARGE_UNIT_COL].median():.3f}")
 
 
@@ -231,8 +253,8 @@ def _plot_charge_density(result: dict, key_suffix: str = ""):
         )
 
     fig.update_layout(
-        title="q 分布中的最终峰与半峰宽有效区间",
-        xaxis_title="电荷估计 q / 1e-19 C",
+        title="q 分布中的峰中心与半峰宽有效区间",
+        xaxis_title=f"电荷估计 q / {CHARGE_UNIT_LABEL}",
         yaxis_title="概率密度",
         bargap=0.04,
         margin=dict(l=60, r=30, t=60, b=60),
@@ -242,7 +264,7 @@ def _plot_charge_density(result: dict, key_suffix: str = ""):
                     use_container_width=True)
     if hidden_count > 0:
         st.caption(
-            f"图中只显示最终峰附近的数据；{hidden_count} 个长尾或半峰宽外点未进入该视窗，但仍保留在明细表中。")
+            f"图中只显示最终峰附近的数据；{hidden_count} 个长尾或半峰宽外点未进入该视窗。")
 
 
 def _plot_spacing_discovery(result: dict):
@@ -289,7 +311,7 @@ def _plot_spacing_discovery(result: dict):
     fig.update_layout(
         title="从峰中心后验发现共同电荷间距",
         xaxis_title="发现峰序号（按 q 从小到大排序）",
-        yaxis_title="峰中心 q / 1e-19 C",
+        yaxis_title=f"峰中心 q / {CHARGE_UNIT_LABEL}",
         xaxis=dict(dtick=1),
         margin=dict(l=60, r=30, t=60, b=60),
     )
@@ -392,7 +414,7 @@ def _plot_discovered_curves(result: dict):
         y_axis = dict(range=[low - pad, high + pad])
 
     fig.update_layout(
-        title="最终可用结果：各电荷峰对应的 U-t 曲线",
+        title="各电荷峰对应的 U-t 曲线",
         xaxis_title="下落时间 t / s",
         yaxis_title="平衡电压 U / V",
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
@@ -404,17 +426,39 @@ def _plot_discovered_curves(result: dict):
     st.plotly_chart(fig, key="discovery_curve_plot_v2",
                     use_container_width=True)
     st.caption(
-        "图中每条线已经代入对应的电荷峰中心，因此学生最终看到的是每个峰自己的 U(t) 曲线；散点只抽样显示高置信点以保持页面流畅。")
+        "每个峰的 U(t) 曲线。散点只抽样显示高置信点。")
     if len(curve_items) < 2:
         st.warning("当前结果只有一个电荷峰满足拟合条件。请检查聚类峰数、半峰宽或最少点数设置。")
 
 
 def _render_result_summary(result: dict):
     params = result["global_params"]
+    curve_items = _cluster_curve_items(result)
+
+    st.subheader("最终公式")
+    st.caption(
+        "每条峰曲线最终结果。中间共享模型里的 Qc 已经被对应峰中心代入，最终曲线只剩下 t。")
+    for cluster_id, (_, _, expr) in sorted(curve_items.items()):
+        with st.container(border=True):
+            st.markdown(f"**峰 {cluster_id}**")
+            st.latex(rf"U_{cluster_id}(t) = {_latex_two_decimals(expr)}")
+
+    with st.expander("为什么中间模型里会出现 Qc？", expanded=False):
+        st.markdown(
+            """
+            `Q_c` 不是最后要求学生求解的未知量。它表示 AI 从 Q 分布中发现的某个电荷峰中心。
+
+            符号回归先学习一个共享关系 `U(t, Q_c)`，这样多条曲线能共用同一套规律；
+            展示最终结果时，系统会把每个峰自己的 `Q_c` 数值代入，得到上面的 `U_i(t)`。
+            """)
+        st.latex(rf"U(t,Q_c) = {_latex_two_decimals(result['symbolic_expression'])}")
+
+    st.subheader("最终拟合结果")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("发现 q 峰数", params["cluster_count"])
-    col2.metric("共同间距/1e-19C", f"{params['spacing_1e19C']:.4f}")
-    col3.metric("整体 R²", f"{params['formula_r2']:.4f}")
+    col2.metric(f"共同间距/{CHARGE_UNIT_LABEL}",
+                f"{params['spacing_1e19C']:.2f}")
+    col3.metric("整体 R²", f"{params['formula_r2']:.2f}")
     col4.metric("参与拟合点数", params["fit_points"])
 
     method_names = {
@@ -425,27 +469,8 @@ def _render_result_summary(result: dict):
     method_label = method_names.get(params.get("discovery_method"), "")
     col1, col2, col3 = st.columns(3)
     col1.metric("t 幂指数", f"{params['time_power']:.2f}")
-    col2.metric("RMSE/V", f"{params['formula_rmse']:.3f}")
+    col2.metric("RMSE/V", f"{params['formula_rmse']:.2f}")
     col3.metric("公式来源", method_label)
-
-    curve_items = _cluster_curve_items(result)
-    st.subheader("最终公式：已代入每个电荷峰中心")
-    st.caption(
-        "这里展示的是学生可直接使用的每条峰曲线。中间共享模型里的 Qc 已经被对应峰中心代入，所以最终曲线只剩下 t。")
-    for cluster_id, (_, _, expr) in sorted(curve_items.items()):
-        with st.container(border=True):
-            st.markdown(f"**峰 {cluster_id}**")
-            st.latex(rf"U_{cluster_id}(t) = {sp.latex(expr)}")
-
-    with st.expander("为什么中间模型里会出现 Qc？", expanded=False):
-        st.markdown(
-            """
-            `Q_c` 不是最后要求学生求解的未知量。它表示 AI 从 Q 分布中发现的某个电荷峰中心。
-
-            符号回归先学习一个共享关系 `U(t, Q_c)`，这样多条曲线能共用同一套规律；
-            展示最终结果时，系统会把每个峰自己的 `Q_c` 数值代入，得到上面的 `U_i(t)`。
-            """)
-        st.latex(rf"U(t,Q_c) = {sp.latex(result['symbolic_expression'])}")
 
 
 def _render_ai_workflow(result: dict):
@@ -537,7 +562,7 @@ def _render_ai_workflow(result: dict):
         if neural:
             metrics = neural.get("teacher_metrics", {})
             st.caption(
-                f"AI teacher 使用 {metrics.get('model_count', 0)} 个 MLP 组成集成，在留出测试集上的 RMSE 为 {metrics.get('test_rmse', np.nan):.2f} V；最终公式是对神经网络平滑曲面的符号蒸馏。")
+                f"AI teacher 使用 {metrics.get('model_count', 0)} 个 MLP 组成集成，在留出测试集上的 RMSE 为 {metrics.get('test_rmse', np.nan):.2f} V；这里展示了神经网络平滑和蒸馏过程。")
         elif two_stage:
             time_candidates = two_stage.get("time_stage_candidates",
                                             pd.DataFrame())
@@ -550,7 +575,7 @@ def _render_ai_workflow(result: dict):
                 coefficient_candidates) if isinstance(
                     coefficient_candidates, pd.DataFrame) else 0
             st.caption(
-                f"符号发现没有指定正确公式；系统比较了 {time_count} 个共同 t 指数候选和 {coefficient_count} 个 Q_c 幂关系候选，并在误差接近时优先选择更简洁的有理幂。")
+                f"系统比较了 {time_count} 个共同 t 指数候选和 {coefficient_count} 个 Q_c 幂关系候选，并在误差接近时优先选择更简洁的有理幂。")
 
 
 def _plot_neural_teacher(result: dict):
@@ -566,7 +591,7 @@ def _plot_neural_teacher(result: dict):
     with st.container(border=True):
         st.subheader("神经网络辅助去噪与符号蒸馏")
         st.caption(
-            "神经网络不直接给出物理结论，而是先学习噪声数据中的平滑 U=f(t,Q_c) 关系；符号回归再把这个 AI teacher 压缩成可解释公式。")
+            "神经网络先学习噪声数据中的平滑 U=f(t,Q_c) 关系；符号回归再把 AI teacher 压缩成可解释公式。")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("AI模型", metrics.get("model", "MLP"))
         col2.metric("集成数量", metrics.get("model_count", 0))
@@ -624,21 +649,25 @@ def _plot_neural_teacher(result: dict):
                     list(candidates[role_mask | selected_mask].index)))
             display = candidates.loc[keep_indices].copy()
             display.insert(0, "rank", np.arange(1, len(display) + 1))
-            st.markdown("**AI teacher 蒸馏出的候选公式**")
-            for _, row in display.iterrows():
-                with st.container(border=True):
-                    role_names = {
-                        "lowest_error": "最低误差经验式",
-                        "simple_main_law": "简洁主规律式",
-                        "pareto_simple": "Pareto简洁式",
-                    }
-                    role = role_names.get(row.get("role", ""), "")
-                    selected = " · 主推" if bool(row.get("selected", False)) else ""
-                    role_label = f" · {role}" if role else ""
-                    st.markdown(
-                        f"候选 {int(row['rank'])}{selected}{role_label} · `{row['family']}` · "
-                        f"RMSE `{row['rmse']:.3f} V` · R² `{row['r2']:.4f}`")
-                    st.latex(rf"U(t,Q_c) = {row['latex']}")
+            st.markdown("**AI teacher 蒸馏过程指标**")
+            metric_cols = [
+                "rank",
+                "family",
+                "role",
+                "selected",
+                "rmse",
+                "mae",
+                "r2",
+                "bic",
+            ]
+            metric_cols = [col for col in metric_cols if col in display]
+            display_metrics = _round_numeric_columns(
+                display[metric_cols],
+                ["rmse", "mae", "r2", "bic"],
+                digits=2,
+            )
+            st.dataframe(display_metrics, use_container_width=True,
+                         hide_index=True)
 
 
 def _plot_peak_stability(result: dict):
@@ -655,7 +684,7 @@ def _plot_peak_stability(result: dict):
             marker_color="#2a7f78",
             customdata=np.stack(
                 [
-                    display["Q_center(1e-19C)"].round(3).astype(str),
+                    display["Q_center(1e-19C)"].round(2).astype(str),
                     display["points"].astype(str),
                 ],
                 axis=-1,
@@ -769,12 +798,12 @@ def _plot_two_stage_discovery(result: dict):
             x=q_line,
             y=y_line,
             mode="lines",
-            name=f"系数 ≈ A·Q_c^{coeff_best['charge_power']:.2f}",
+            name=f"系数趋势，幂指数 {coeff_best['charge_power']:.2f}",
             line=dict(width=3, color="#234f6c"),
         ))
     fig.update_layout(
         title="阶段二：从各峰系数发现 Q_c 幂关系",
-        xaxis_title="峰中心 Q_c / 1e-19 C",
+        xaxis_title=f"峰中心 Q_c / {CHARGE_UNIT_LABEL}",
         yaxis_title="阶段一曲线系数",
         margin=dict(l=60, r=30, t=60, b=60),
     )
@@ -800,8 +829,8 @@ def _plot_symbolic_candidates(result: dict):
         axis=1,
     )
 
-    st.subheader("全局候选式搜索对照")
-    st.caption("这些候选式直接在所有高置信点上搜索，作为两阶段发现结果的对照。RMSE 越低越好；BIC 会同时惩罚误差和公式复杂度。")
+    st.subheader("全局候选结构搜索对照")
+    st.caption("RMSE 越低越好；BIC 会同时惩罚误差和复杂度。")
 
     fig = go.Figure()
     fig.add_trace(
@@ -831,24 +860,15 @@ def _plot_symbolic_candidates(result: dict):
                 "BIC=%{customdata[1]}<extra></extra>"),
         ))
     fig.update_layout(
-        title="候选符号表达式误差比较",
+        title="候选结构误差比较",
         xaxis_title="RMSE / V",
-        yaxis_title="候选式结构",
+        yaxis_title="候选结构",
         yaxis=dict(autorange="reversed"),
         margin=dict(l=260, r=140, t=60, b=60),
         height=max(420, 62 * len(display)),
     )
     st.plotly_chart(fig, key="symbolic_candidate_plot_readable_v2",
                     use_container_width=True)
-
-    st.markdown("**候选公式（数学排版）**")
-    for _, row in display.iterrows():
-        with st.container(border=True):
-            st.markdown(
-                f"候选 {int(row['rank'])} · `{row['family']}` · "
-                f"RMSE `{row['rmse']:.3f} V` · R² `{row['r2']:.4f}` · "
-                f"BIC `{row['bic']:.1f}`")
-            st.latex(rf"U(t,Q_c) = {row['latex']}")
 
     cols = [
         "rank",
@@ -860,7 +880,15 @@ def _plot_symbolic_candidates(result: dict):
         "r2",
         "bic",
     ]
-    st.dataframe(display[cols], use_container_width=True, hide_index=True)
+    st.dataframe(
+        _round_numeric_columns(
+            display[cols],
+            ["charge_power", "time_power", "rmse", "mae", "r2", "bic"],
+            digits=2,
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 SYMBOLIC_MODEL_OPTIONS = {
@@ -877,11 +905,11 @@ def _render_global_search_guide():
         st.markdown("""
         **核心思想**：先准备一组可能的表达式族，例如单幂律、加性幂律、时间修正项等，再在一组候选幂指数上逐个拟合并比较误差。
 
-        **本实验怎么理解**：系统不会直接写死某个幂指数，而是在 `time_power_min` 到 `time_power_max` 的范围内搜索，让数据决定哪一个候选更好。
+        **本实验应用**：系统不会直接写死某个幂指数，而是在 `time_power_min` 到 `time_power_max` 的范围内搜索，让数据决定哪一个候选更好。
 
-        **适合**：快速得到一批可解释候选式，并比较 RMSE、R²、BIC。
+        **适用范围**：快速得到一批可解释候选式，并比较 RMSE、R²、BIC。
 
-        **注意**：候选库仍然限定了搜索空间，所以它是“可控的符号搜索”，不是任意公式生成器。
+        **注意**：候选库仍然限定了搜索空间，所以它是可控的符号搜索，不是任意公式生成器。
         """)
     with col_plot:
         beta = np.array([-2.2, -1.8, -1.5, -1.2, -0.8])
@@ -908,11 +936,11 @@ def _render_two_stage_guide():
         st.markdown("""
         **核心思想**：先把每个 Q 峰看作一条独立曲线，寻找所有曲线共同的时间幂指数；再研究这些曲线系数如何随峰中心变化。
 
-        **本实验怎么理解**：第一阶段回答“所有峰的 U-t 曲线有没有共同形状”；第二阶段回答“峰中心 Q_c 只是在改变曲线系数吗”。
+        **本实验应用**：第一阶段回答“所有峰的 U-t 曲线有没有共同形状”；第二阶段回答“峰中心 Q_c 是否只改变曲线系数”。
 
-        **适合**：需要向学生解释多条曲线如何共享同一个物理规律。
+        **适用范围**：解释多条曲线如何共享同一个物理规律。
 
-        **注意**：中间式会出现 `Q_c`，它只是“峰中心”的占位量；最终展示给学生时会代入每个峰中心，得到 `U_i(t)`。
+        **关于Q_c**：中间式会出现 `Q_c`，它只是“峰中心”的占位量；最终展示给学生时会代入每个峰中心，得到 `U_i(t)`。
         """)
     with col_plot:
         q = np.array([1.8, 3.4, 5.0, 6.5, 8.2])
@@ -928,7 +956,7 @@ def _render_two_stage_guide():
                                  line=dict(width=3, color="#284b63"),
                                  name="系数-Qc 关系"))
         fig.update_layout(title="两阶段：先找共同 t 形状，再找系数-Qc 关系",
-                          xaxis_title="峰中心 Q_c / 1e-19 C",
+                          xaxis_title=f"峰中心 Q_c / {CHARGE_UNIT_LABEL}",
                           yaxis_title="曲线系数",
                           height=270,
                           margin=dict(l=55, r=20, t=55, b=45))
@@ -942,9 +970,9 @@ def _render_teacher_guide():
         st.markdown("""
         **核心思想**：先用神经网络集成学习噪声数据中的平滑曲面，再把这个平滑 teacher 的行为压缩成简洁公式。
 
-        **本实验怎么理解**：神经网络负责抗噪和平滑，符号回归负责把规律翻译成学生能读懂的数学表达式。
+        **本实验应用**：神经网络负责抗噪和平滑，符号回归负责把规律翻译成数学表达式。
 
-        **适合**：实验点有噪声、离群点已经筛出，但每条曲线仍有局部波动。
+        **适用范围**：实验点有噪声、离群点已经筛出，但每条曲线仍有局部波动。
 
         **注意**：teacher 不是最终答案；最终仍然要经过符号公式蒸馏和误差检验。
 
@@ -974,7 +1002,7 @@ def _render_symbolic_model_guide():
     with st.container(border=True):
         st.subheader("符号回归三类模型")
         st.caption(
-            "符号回归不是直接套最终公式，而是在高可信点上比较不同的可解释模型路径。学生看完三类模型后，再执行回归。")
+            "符号回归在高可信点上比较不同的可解释模型路径。")
         tabs = st.tabs(["全局候选式搜索", "两阶段符号发现", "神经网络 teacher 蒸馏"])
         with tabs[0]:
             _render_global_search_guide()
@@ -983,17 +1011,17 @@ def _render_symbolic_model_guide():
         with tabs[2]:
             _render_teacher_guide()
         st.info(
-            "关于 t 的幂指数：本页默认在一个连续候选范围内搜索，不把 2/3 或 3/2 直接写成答案；如果数据支持，结果会自然靠近物理上合理的幂指数。")
+            "关于 t 的幂指数：系统默认在一个连续候选范围内搜索；如果数据支持，结果会自然靠近物理上合理的幂指数。")
 
 
 def render_tab_regress():
     st.header("机器学习—符号回归")
     st.caption(
-        "本页接在 AI 聚类之后：先确认高可信点，再选择符号回归模型，最后才展示最终拟合公式。")
+        "本页接在 AI 聚类之后：先确认高可信点，再选择符号回归模型并查看处理过程；最终公式请到“后验检验与最终结果”页查看。")
 
     has_user_data = not st.session_state.data.empty
     if not has_user_data:
-        st.info("当前还没有导入测量数据。本页默认使用根目录 oil_drop_reference.csv 作为测试数据继续符号回归流程。")
+        st.info("当前还没有导入测量数据。本页默认使用内置数据作为测试数据继续符号回归流程。")
 
     clustering_result = st.session_state.get("charge_clustering_result")
     if (clustering_result and
@@ -1012,7 +1040,7 @@ def render_tab_regress():
 
     if clustering_result:
         st.subheader("第一步：确认聚类筛出的高可信点")
-        st.caption("半峰宽筛选只发生在聚类之后。色带内的点进入符号回归，色带外的长尾点保留在明细中但不参与拟合。")
+        st.caption("半峰宽筛选只发生在聚类之后。色带内的点进入符号回归，色带外的长尾点不参与拟合。")
         _plot_charge_density(clustering_result, key_suffix="_pre_regression")
 
     _render_symbolic_model_guide()
@@ -1034,9 +1062,11 @@ def render_tab_regress():
                                                 step=0.10)
         with col3:
             include_reference = st.checkbox(
-                "使用根目录测试数据",
-                value=not has_user_data,
-                help="没有测量数据时用 D:\\GitHub\\seuphyx\\oil_drop_reference.csv 继续回归；已有测量数据时可作为补充数据。")
+                "合并内置基础数据",
+                value=True,
+                disabled=True,
+                key="regression_include_reference_v2",
+                help="最终拟合始终合并 D:\\GitHub\\seuphyx\\oil_drop_reference.csv 与学生视觉自动测量/手动录入数据。")
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -1054,7 +1084,7 @@ def render_tab_regress():
 
                     **DBSCAN**：按密度找簇，不需要预设簇数，但参数敏感，容易把长尾数据拆成很多小簇。
 
-                    **KDE 峰发现**：先画出 Q 的连续密度，再找峰；当前默认使用它，因为它最贴近“从分布中发现电荷峰”的教学逻辑。
+                    **KDE 峰发现**：先画出 Q 的连续密度，再找峰；当前默认使用。
                     """)
         with col2:
             requested_clusters = st.slider(
@@ -1066,7 +1096,7 @@ def render_tab_regress():
                 help="K-Means/GMM 使用该簇数；KDE 作为最多保留峰数；DBSCAN 不使用。")
         with col3:
             half_width_abs = st.slider(
-                "半峰宽容差 / x10^-19C",
+                f"半峰宽容差 / {CHARGE_UNIT_LABEL}",
                 0.05,
                 0.80,
                 0.25,
@@ -1079,10 +1109,10 @@ def render_tab_regress():
                 "符号回归模型策略",
                 list(SYMBOLIC_MODEL_OPTIONS.keys()),
                 index=0,
-                help="自动比较会优先采用可用的神经网络 teacher 蒸馏结果；也可以强制查看某一类模型的最终结果。")
+                help="自动比较会优先采用可用的神经网络 teacher 蒸馏路径；也可以指定某一类模型路径重新执行。")
         with col2:
             st.caption(
-                "建议课堂演示先保持“自动比较三类模型”，再分别切换到三种模型观察结果差异。三种模型的原理见上方标签页。")
+                "建议先保持“自动比较三类模型”，再分别切换到三种模型观察结果差异。三种模型的原理见上方标签页。")
 
         selected_clusters = None
         if available_clusters:
@@ -1219,7 +1249,7 @@ def render_tab_regress():
     st.subheader("第三步：查看 AI 处理过程")
     process_view = st.radio(
         "处理过程视图",
-        ["高可信点筛选", "三类模型过程", "后验检验"],
+        ["高可信点筛选", "三类模型过程"],
         horizontal=True,
         label_visibility="collapsed",
         key="symbolic_process_view",
@@ -1241,10 +1271,27 @@ def render_tab_regress():
             _plot_two_stage_discovery(result)
         else:
             _plot_neural_teacher(result)
-    else:
-        _plot_spacing_discovery(result)
+    st.info("后验检验、最终公式和最终拟合结果已移到顶部“后验检验与最终结果”页。")
 
-    st.subheader("第四步：最终拟合结果")
+
+def render_regression_results_page():
+    st.header("后验检验与最终结果")
+    st.caption("完整符号回归完成后的最终公式、最终拟合结果和后验检验。")
+
+    if "regression_results" not in st.session_state:
+        st.info("还没有可展示的最终结果。请先在“机器学习—符号回归”页执行回归。")
+        return
+
+    result = st.session_state.regression_results
+    if result.get("mode") != "discovery":
+        st.warning("当前会话中保存的是旧版物理约束拟合结果，请重新执行 AI 发现式聚类与拟合。")
+        return
+    if result.get("result_version") != RESULT_VERSION:
+        st.session_state.pop("regression_results", None)
+        st.session_state.pop("data_discovery_clustered", None)
+        st.info("AI 聚类与符号回归逻辑已更新，请重新点击“执行机器学习—符号回归”。")
+        return
+
     _render_result_summary(result)
     _plot_discovered_curves(result)
 
@@ -1261,9 +1308,19 @@ def render_tab_regress():
         display_cols = [
             col for col in display_cols if col in result["peak_summary"]
         ]
-        st.dataframe(result["peak_summary"][display_cols],
-                     use_container_width=True,
-                     hide_index=True)
+        peak_display = _round_numeric_columns(
+            result["peak_summary"][display_cols],
+            ["Q_center(1e-19C)", "half_width(1e-19C)", "mae", "r2"],
+            digits=2,
+        ).rename(
+            columns={
+                "Q_center(1e-19C)": f"峰中心 Q/{CHARGE_UNIT_LABEL}",
+                "half_width(1e-19C)": f"半峰宽/{CHARGE_UNIT_LABEL}",
+            })
+        st.dataframe(peak_display, use_container_width=True, hide_index=True)
+
+    st.subheader("后验检验")
+    _plot_spacing_discovery(result)
 
     with st.expander("查看候选式数值指标", expanded=False):
         candidate_cols = [
@@ -1282,8 +1339,22 @@ def render_tab_regress():
             col for col in candidate_cols
             if col in result["candidate_models"].columns
         ]
-        st.dataframe(result["candidate_models"][available_candidate_cols],
-                     use_container_width=True)
+        candidate_display = _round_numeric_columns(
+            result["candidate_models"][available_candidate_cols],
+            [
+                "charge_power",
+                "time_power",
+                "b",
+                "coef1",
+                "coef2",
+                "rmse",
+                "mae",
+                "r2",
+                "bic",
+            ],
+            digits=2,
+        )
+        st.dataframe(candidate_display, use_container_width=True)
 
     with st.expander("查看 q 聚类明细", expanded=False):
         if st.checkbox("显示完整明细表（较慢）", value=False,
@@ -1304,5 +1375,11 @@ def render_tab_regress():
             available_cols = [
                 col for col in detail_cols if col in result["clusters"].columns
             ]
-            st.dataframe(result["clusters"][available_cols],
-                         use_container_width=True)
+            detail = result["clusters"][available_cols].rename(
+                columns={
+                    CHARGE_UNIT_COL: f"电荷估计 Q/{CHARGE_UNIT_LABEL}",
+                    CHARGE_CENTER_COL: f"峰中心/{CHARGE_UNIT_LABEL}",
+                    CHARGE_DISTANCE_COL: f"距离峰中心/{CHARGE_UNIT_LABEL}",
+                    CHARGE_HALF_WIDTH_COL: f"半峰宽/{CHARGE_UNIT_LABEL}",
+                })
+            st.dataframe(detail, use_container_width=True)

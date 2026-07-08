@@ -15,6 +15,9 @@ from seuphyx.core.oil.tabs.regression import (
 )
 
 
+CHARGE_UNIT_LABEL = "10⁻¹⁹ C"
+
+
 def render_tab_record():
     # user data file
     work_dir = st.session_state.work_dir
@@ -112,21 +115,23 @@ def render_tab_record():
                 marker=dict(size=10, color="#d62728", opacity=0.88),
                 customdata=charged[[TIME_COL]].to_numpy(),
                 hovertemplate=(
-                    "Q=%{x:.3f} x10^-19 C<br>"
+                    f"Q=%{{x:.3f}} {CHARGE_UNIT_LABEL}<br>"
                     "U=%{y:.2f} V<br>"
                     "t=%{customdata[0]:.3f} s<extra></extra>"),
             ))
         fig.update_layout(
             title="学生实测数据：Q-U 散点",
-            xaxis_title="电荷量 Q / x10^-19 C",
+            xaxis_title=f"电荷量 Q / {CHARGE_UNIT_LABEL}",
             yaxis_title="平衡电压 U / V",
             margin=dict(l=60, r=30, t=60, b=60),
             showlegend=True,
         )
         st.plotly_chart(fig, key="student_q_scatter_plot",
                         use_container_width=True)
+        display = charged[[TIME_COL, VOLTAGE_COL, CHARGE_UNIT_COL]].rename(
+            columns={CHARGE_UNIT_COL: f"电荷量 Q/{CHARGE_UNIT_LABEL}"})
         st.dataframe(
-            charged[[TIME_COL, VOLTAGE_COL, CHARGE_UNIT_COL]],
+            display,
             use_container_width=True,
             hide_index=True,
         )

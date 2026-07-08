@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import sympy as sp
 from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfbase import pdfmetrics
@@ -33,6 +34,7 @@ PLOT_COLORS = [
     "#be123c",
     "#4d7c0f",
 ]
+CHARGE_UNIT_LABEL = "10⁻¹⁹ C"
 
 
 def _get_dataframe_state(key):
@@ -91,6 +93,17 @@ def _format_number(value, digits=3, suffix=""):
     if not np.isfinite(number):
         return "-"
     return f"{number:.{digits}f}{suffix}"
+
+
+def _format_expression(expression):
+    if not hasattr(expression, "atoms"):
+        return str(expression)
+    replacements = {}
+    for atom in expression.atoms(sp.Float):
+        value = float(atom)
+        if np.isfinite(value):
+            replacements[atom] = sp.Float(f"{value:.2f}")
+    return str(expression.xreplace(replacements))
 
 
 def _format_int(value):
@@ -160,17 +173,18 @@ def _peak_summary_view(result):
     display = summary[display_cols].copy()
     rename_map = {
         "cluster": "q峰",
-        "Q_center(1e-19C)": "峰中心 q/1e-19C",
-        "half_width(1e-19C)": "半峰宽/1e-19C",
+        "Q_center(1e-19C)": f"峰中心 q/{CHARGE_UNIT_LABEL}",
+        "half_width(1e-19C)": f"半峰宽/{CHARGE_UNIT_LABEL}",
         "points": "高置信点数",
         "mae": "MAE/V",
         "r2": "R2",
     }
     display = display.rename(columns=rename_map)
-    for col in ["峰中心 q/1e-19C", "半峰宽/1e-19C", "MAE/V", "R2"]:
+    for col in [f"峰中心 q/{CHARGE_UNIT_LABEL}",
+                f"半峰宽/{CHARGE_UNIT_LABEL}", "MAE/V", "R2"]:
         if col in display.columns:
             display[col] = pd.to_numeric(display[col],
-                                         errors="coerce").round(4)
+                                         errors="coerce").round(2)
     if "q峰" in display.columns:
         display["q峰"] = display["q峰"].astype("Int64")
     if "高置信点数" in display.columns:
@@ -468,9 +482,9 @@ def _create_pdf_report(pdf_file, student, regression_results, font_path, fig):
     y_coordinate = _draw_pdf_text(
         pdf, y_coordinate,
         "共同电荷间距: "
-        f"{_format_number(metrics['spacing'], 4)} x 10^-19 C；"
-        f"整体 R2: {_format_number(metrics['r2'], 4)}；"
-        f"RMSE: {_format_number(metrics['rmse'], 3)} V。",
+        f"{_format_number(metrics['spacing'], 2)} {CHARGE_UNIT_LABEL}；"
+        f"整体 R2: {_format_number(metrics['r2'], 2)}；"
+        f"RMSE: {_format_number(metrics['rmse'], 2)} V。",
         font_name)
 
     y_coordinate -= 8
@@ -482,7 +496,8 @@ def _create_pdf_report(pdf_file, student, regression_results, font_path, fig):
         font_name)
     for _, display_label, _, _, expression in _curve_items(regression_results):
         y_coordinate = _draw_pdf_text(
-            pdf, y_coordinate, f"峰 {display_label}: U(t) = {expression}",
+            pdf, y_coordinate,
+            f"峰 {display_label}: U(t) = {_format_expression(expression)}",
             font_name, font_size=10, indent=12, line_gap=5)
 
     peak_summary = _peak_summary_view(regression_results)
@@ -496,8 +511,8 @@ def _create_pdf_report(pdf_file, student, regression_results, font_path, fig):
                 "峰 {peak}: q中心={center}, 半峰宽={width}, "
                 "高置信点={points}, MAE={mae}, R2={r2}".format(
                     peak=row.get("q峰", "-"),
-                    center=row.get("峰中心 q/1e-19C", "-"),
-                    width=row.get("半峰宽/1e-19C", "-"),
+                    center=row.get(f"峰中心 q/{CHARGE_UNIT_LABEL}", "-"),
+                    width=row.get(f"半峰宽/{CHARGE_UNIT_LABEL}", "-"),
                     points=row.get("高置信点数", "-"),
                     mae=row.get("MAE/V", "-"),
                     r2=row.get("R2", "-"),
@@ -535,7 +550,7 @@ def _render_report_preview(regression_results):
     col1.metric("分析数据点", metrics["total_points"])
     col2.metric("高置信点", metrics["fit_points"])
     col3.metric("发现 q 峰", _format_int(metrics["cluster_count"]))
-    col4.metric("整体 R2", _format_number(metrics["r2"], 4))
+    col4.metric("整体 R2", _format_number(metrics["r2"], 2))
 
     st.markdown(
         "- AI 先从连续电荷估计中发现 q 峰，再用半峰宽筛选高置信点。\n"
@@ -548,7 +563,8 @@ def _render_report_preview(regression_results):
         for _, display_label, _, _, expression in curve_items:
             with st.container(border=True):
                 st.markdown(f"峰 {display_label}")
-                st.code(f"U(t) = {expression}", language="text")
+                st.code(f"U(t) = {_format_expression(expression)}",
+                        language="text")
 
     peak_summary = _peak_summary_view(regression_results)
     if not peak_summary.empty:

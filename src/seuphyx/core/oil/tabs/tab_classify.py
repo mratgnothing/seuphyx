@@ -34,6 +34,7 @@ CLUSTER_METHODS = {
 }
 
 CHARGE_CLUSTERING_RESULT_VERSION = "q-ai-clustering-v9"
+CHARGE_UNIT_LABEL = "10⁻¹⁹ C"
 
 
 def _config_cache_key(config: DiscoveryRegressionConfig) -> tuple:
@@ -174,7 +175,7 @@ def _plot_raw_measurements(raw: pd.DataFrame):
     with st.container(border=True):
         st.subheader("第一步：先看全部原始测量点")
         st.caption(
-            "这张图只画实验直接记录的下落时间 t 和平衡电压 U，不做分类、不加颜色标签。学生先观察原始点云，再进入 AI 聚类。")
+            "下落时间 t 和平衡电压 U 的实验直接记录")
         cols = st.columns(4)
         cols[0].metric("总点数", _display_count(len(raw)))
         cols[1].metric("t 中位数/s", f"{raw[TIME_COL].median():.2f}")
@@ -182,21 +183,59 @@ def _plot_raw_measurements(raw: pd.DataFrame):
         cols[3].metric("数据来源", _source_label(raw, "混合数据"))
 
         fig = go.Figure()
-        fig.add_trace(
-            go.Scattergl(
-                x=raw[TIME_COL],
-                y=raw[VOLTAGE_COL],
-                mode="markers",
-                name="全部测量点",
-                marker=dict(size=5, color="#375a7f", opacity=0.48),
-                hovertemplate="t=%{x:.2f} s<br>U=%{y:.1f} V<extra></extra>",
-            ))
+        if SOURCE_COL in raw.columns:
+            reference = raw[raw[SOURCE_COL] == "根目录测试数据"]
+            student = raw[raw[SOURCE_COL] == "学生实测数据"]
+            other = raw[~raw.index.isin(reference.index.union(student.index))]
+        else:
+            reference = raw
+            student = raw.iloc[0:0]
+            other = raw.iloc[0:0]
+
+        if not reference.empty:
+            fig.add_trace(
+                go.Scattergl(
+                    x=reference[TIME_COL],
+                    y=reference[VOLTAGE_COL],
+                    mode="markers",
+                    name="内置基础数据",
+                    marker=dict(size=4, color="#355f7d", opacity=0.26),
+                    hovertemplate="t=%{x:.2f} s<br>U=%{y:.1f} V<extra></extra>",
+                ))
+        if not other.empty:
+            fig.add_trace(
+                go.Scattergl(
+                    x=other[TIME_COL],
+                    y=other[VOLTAGE_COL],
+                    mode="markers",
+                    name="其他数据",
+                    marker=dict(size=5, color="#6b7280", opacity=0.45),
+                    hovertemplate="t=%{x:.2f} s<br>U=%{y:.1f} V<extra></extra>",
+                ))
+        if not student.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=student[TIME_COL],
+                    y=student[VOLTAGE_COL],
+                    mode="markers",
+                    name="学生实测数据",
+                    marker=dict(
+                        size=11,
+                        color="#e11d48",
+                        opacity=0.96,
+                        symbol="circle",
+                        line=dict(color="#ffffff", width=1.5),
+                    ),
+                    hovertemplate="学生实测<br>t=%{x:.2f} s<br>U=%{y:.1f} V<extra></extra>",
+                ))
         fig.update_layout(
             title="原始 U-t 点云",
             xaxis_title="下落时间 t / s",
             yaxis_title="平衡电压 U / V",
             height=460,
-            margin=dict(l=60, r=30, t=60, b=60),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1),
+            margin=dict(l=60, r=30, t=80, b=60),
         )
         st.plotly_chart(fig, key="raw_measurement_scatter_all_points",
                         use_container_width=True)
@@ -210,14 +249,14 @@ def _plot_q_estimation_overview(charged: pd.DataFrame):
     with st.container(border=True):
         st.subheader("第三步：由物理量估算连续电荷 Q")
         st.caption(
-            "这里仍然不预设“第几个电子电荷”，也不先给整数标签。系统只根据 t、U 和实验常量，为每个油滴计算一个连续的 Q 估计值。")
+            "系统根据 t、U 和实验常量，为每个油滴计算一个连续的 Q 估计值。")
         plot_min, plot_max, hidden_count = _q_display_window(
             charged[CHARGE_UNIT_COL])
         cols = st.columns(4)
         cols[0].metric("有效点数", _display_count(len(charged)))
-        cols[1].metric("Q 中位数/1e-19 C",
+        cols[1].metric(f"Q 中位数/{CHARGE_UNIT_LABEL}",
                        f"{charged[CHARGE_UNIT_COL].median():.3f}")
-        cols[2].metric("主体 Q 窗口/1e-19 C",
+        cols[2].metric(f"主体 Q 窗口/{CHARGE_UNIT_LABEL}",
                        f"{plot_min:.2f}-{plot_max:.2f}")
         cols[3].metric("t 范围/s",
                        f"{charged[TIME_COL].min():.2f}-{charged[TIME_COL].max():.2f}")
@@ -239,7 +278,7 @@ def _plot_q_estimation_overview(charged: pd.DataFrame):
                 ))
             fig.update_layout(
                 title="连续 Q-U 点云",
-                xaxis_title="电荷估计 Q / 1e-19 C",
+                xaxis_title=f"电荷估计 Q / {CHARGE_UNIT_LABEL}",
                 yaxis_title="平衡电压 U / V",
                 margin=dict(l=55, r=20, t=50, b=50),
                 height=390,
@@ -259,7 +298,7 @@ def _plot_q_estimation_overview(charged: pd.DataFrame):
                 ))
             hist.update_layout(
                 title="Q 一维分布",
-                xaxis_title="电荷估计 Q / 1e-19 C",
+                xaxis_title=f"电荷估计 Q / {CHARGE_UNIT_LABEL}",
                 yaxis_title="点数",
                 bargap=0.03,
                 margin=dict(l=55, r=20, t=50, b=50),
@@ -270,7 +309,7 @@ def _plot_q_estimation_overview(charged: pd.DataFrame):
                             use_container_width=True)
         if hidden_count:
             st.caption(
-                f"为避免少数极端长尾值压扁主体分布，图中默认显示 Q 主体区间；{hidden_count} 个长尾点未显示在该窗口内，但仍保留在完整明细和低可信判定中。")
+                f"为避免少数极端长尾值压扁主体分布，图中默认显示 Q 主体区间；{hidden_count} 个长尾点未显示在该窗口内。")
 
 
 def _normal_pdf(x: np.ndarray, mean: float, sigma: float) -> np.ndarray:
@@ -285,11 +324,11 @@ def _render_kmeans_guide():
         st.markdown("""
         **核心思想**：先指定要找几个簇，然后反复执行两件事：把每个点分给最近的中心，再把中心移动到本簇点的平均位置。
 
-        **本实验怎么理解**：如果 Q 分布里有几个明显的峰，K-Means 会把 Q 轴切成几个靠近不同中心的区域。
+        **本实验应用**：如果 Q 分布里有几个明显的峰，K-Means 会把 Q 轴切成几个靠近不同中心的区域。
 
-        **适合**：峰数大致知道、峰之间分得比较开。
+        **适用范围**：峰数大致知道、峰之间分得比较开。
 
-        **注意**：它偏好近似圆形、方差接近的簇；离群点或长尾可能把中心拉偏。
+        **误差来源**：它偏好近似圆形、方差接近的簇；离群点或长尾可能把中心拉偏。
 
         参考：scikit-learn 聚类指南说明 K-Means 通过最小化簇内平方和来划分样本。
         """)
@@ -309,7 +348,8 @@ def _render_kmeans_guide():
                 marker=dict(size=16, color=colors[idx], symbol="x"),
                 name=f"中心{idx+1}"))
         fig.update_layout(title="K-Means：点靠近哪个中心就归哪一簇",
-                          xaxis_title="Q / 1e-19 C", yaxis=dict(visible=False),
+                          xaxis_title=f"Q / {CHARGE_UNIT_LABEL}",
+                          yaxis=dict(visible=False),
                           height=260, margin=dict(l=20, r=20, t=50, b=40))
         st.plotly_chart(fig, key="guide_kmeans_plot",
                         use_container_width=True)
@@ -321,11 +361,11 @@ def _render_gmm_guide():
         st.markdown("""
         **核心思想**：把数据看成多个高斯分布混合而成，每个点不是硬性属于某一簇，而是对每个峰都有一个概率。
 
-        **本实验怎么理解**：一个电荷峰可以有中心和宽度；峰之间有重叠时，GMM 会用概率处理模糊边界。
+        **本实验应用**：一个电荷峰可以有中心和宽度；峰之间有重叠时，GMM 会用概率处理模糊边界。
 
-        **适合**：峰形接近钟形、峰宽需要被估计、相邻峰有轻微重叠。
+        **适用范围**：峰形接近钟形、峰宽需要被估计、相邻峰有轻微重叠。
 
-        **注意**：通常仍要给出成分数；样本太少或离群点太多时，协方差估计会不稳定。
+        **误差来源**：通常仍要给出成分数；样本太少或离群点太多时，协方差估计会不稳定。
 
         参考：scikit-learn 文档将 GMM 描述为有限个未知高斯分布的概率混合模型，并用 EM 算法拟合。
         """)
@@ -349,7 +389,8 @@ def _render_gmm_guide():
                                            dash="dash"),
                                  name="混合密度"))
         fig.update_layout(title="GMM：多个概率峰相加生成整体分布",
-                          xaxis_title="Q / 1e-19 C", yaxis_title="概率密度",
+                          xaxis_title=f"Q / {CHARGE_UNIT_LABEL}",
+                          yaxis_title="概率密度",
                           height=260, margin=dict(l=40, r=20, t=50, b=40))
         st.plotly_chart(fig, key="guide_gmm_plot", use_container_width=True)
 
@@ -360,11 +401,11 @@ def _render_dbscan_guide():
         st.markdown("""
         **核心思想**：不先指定簇数，而是寻找“足够密”的区域。一个点在 eps 半径内邻居足够多，就能成为核心点，并把密度相连的点扩展成簇。
 
-        **本实验怎么理解**：Q 轴上点堆得很密的位置会成为电荷峰；孤立点会被标为噪声。
+        **本实验应用**：Q 轴上点堆得很密的位置会成为电荷峰；孤立点会被标为噪声。
 
-        **适合**：想自动识别噪声、离群点较多、不想预设簇数。
+        **适用范围**：想自动识别噪声、离群点较多、不想预设簇数。
 
-        **注意**：eps 和 min_samples 很关键；不同峰密度差异很大时，单一 eps 可能不够好。
+        **误差来源**：eps 和 min_samples 很关键；不同峰密度差异很大时，单一 eps 可能不够好。
 
         参考：DBSCAN 原论文提出用密度连接发现带噪声的空间簇；scikit-learn 也强调其按高密度区域分簇。
         """)
@@ -388,7 +429,8 @@ def _render_dbscan_guide():
                       x0=2.75, x1=3.45, y0=-0.14, y1=0.56,
                       line=dict(color="#b05a31", dash="dot"))
         fig.update_layout(title="DBSCAN：密度半径内邻居足够多才成簇",
-                          xaxis_title="Q / 1e-19 C", yaxis=dict(visible=False),
+                          xaxis_title=f"Q / {CHARGE_UNIT_LABEL}",
+                          yaxis=dict(visible=False),
                           height=260, margin=dict(l=20, r=20, t=50, b=40))
         st.plotly_chart(fig, key="guide_dbscan_plot",
                         use_container_width=True)
@@ -400,11 +442,11 @@ def _render_kde_guide():
         st.markdown("""
         **核心思想**：每个点都贡献一个小的平滑曲线，把所有小曲线叠加成连续密度曲线，再在密度曲线上找峰。
 
-        **本实验怎么理解**：电荷量如果真的趋向若干稳定取值，Q 的密度曲线会自然出现峰；峰中心就是后续回归使用的 Q 中心。
+        **本实验应用**：电荷量如果真的趋向若干稳定取值，Q 的密度曲线会自然出现峰；峰中心就是后续回归使用的 Q 中心。
 
-        **适合**：教学展示“从分布找峰”的物理意义，特别适合一维 Q 分布。
+        **适用范围**：教学展示“从分布找峰”的物理意义，特别适合一维 Q 分布。
 
-        **注意**：带宽太小会把噪声当成峰，带宽太大会把相邻峰抹平。
+        **误差来源**：带宽太小会把噪声当成峰，带宽太大会把相邻峰抹平。
 
         参考：scikit-learn 密度估计指南说明 KDE 用每个点贡献核函数来形成平滑的非参数分布估计。
         """)
@@ -429,7 +471,8 @@ def _render_kde_guide():
                                                  symbol="triangle-up"),
                                      name="密度峰"))
         fig.update_layout(title="KDE：先估计连续密度，再找峰",
-                          xaxis_title="Q / 1e-19 C", yaxis_title="密度",
+                          xaxis_title=f"Q / {CHARGE_UNIT_LABEL}",
+                          yaxis_title="密度",
                           height=260, margin=dict(l=40, r=20, t=50, b=40))
         st.plotly_chart(fig, key="guide_kde_plot", use_container_width=True)
 
@@ -438,7 +481,7 @@ def _render_clustering_method_guide():
     with st.container(border=True):
         st.subheader("第二步：选择无监督聚类算法")
         st.caption(
-            "四种方法都只看连续 Q 分布，不使用已知电子电荷值，也不先把点标成第几个电子。先看懂算法，再执行聚类。")
+            "四种方法都只依据 Q 分布执行聚类。")
         tabs = st.tabs(["K-Means", "Gaussian Mixture", "DBSCAN", "KDE 峰发现"])
         with tabs[0]:
             _render_kmeans_guide()
@@ -455,9 +498,9 @@ def _plot_clustered_q_result(result: dict):
     palette = px.colors.qualitative.Dark24
 
     with st.container(border=True):
-        st.subheader("第四步：AI 聚类后的彩色结果")
+        st.subheader("第四步：AI 聚类结果")
         st.caption(
-            "颜色表示聚类后发现的电荷峰；灰色表示离峰中心太远、暂不进入符号回归的点。半峰宽筛选发生在聚类之后。")
+            "颜色表示聚类后发现的电荷峰；灰色表示离峰中心太远、暂不进入符号回归的点。")
 
         col_left, col_right = st.columns([1.2, 1])
         with col_left:
@@ -573,7 +616,7 @@ def _plot_clustered_q_result(result: dict):
                 )
             hist.update_layout(
                 title="Q 轴上的峰和半峰宽",
-                xaxis_title="电荷估计 Q / 1e-19 C",
+                xaxis_title=f"电荷估计 Q / {CHARGE_UNIT_LABEL}",
                 yaxis_title="点数",
                 barmode="overlay",
                 bargap=0.03,
@@ -596,11 +639,15 @@ def _plot_clustered_q_result(result: dict):
                 "r2",
             ]
             keep = [col for col in keep if col in summary.columns]
-            st.dataframe(summary[keep], use_container_width=True,
-                         hide_index=True)
+            display = summary[keep].rename(
+                columns={
+                    "Q_center(1e-19C)": f"峰中心 Q/{CHARGE_UNIT_LABEL}",
+                    "half_width(1e-19C)": f"半峰宽/{CHARGE_UNIT_LABEL}",
+                })
+            st.dataframe(display, use_container_width=True, hide_index=True)
 
-    with st.expander("查看完整聚类明细（大量数据，默认不渲染）", expanded=False):
-        if st.checkbox("显示完整明细表（较慢）", value=False,
+    with st.expander("查看完整聚类明细（数据较大默认不渲染）", expanded=False):
+        if st.checkbox("显示完整明细表（数据较大默认不渲染）", value=False,
                        key="show_cluster_detail_table"):
             detail_cols = [
                 SOURCE_COL,
@@ -617,7 +664,14 @@ def _plot_clustered_q_result(result: dict):
             available_cols = [
                 col for col in detail_cols if col in clustered.columns
             ]
-            st.dataframe(clustered[available_cols],
+            detail = clustered[available_cols].rename(
+                columns={
+                    CHARGE_UNIT_COL: f"电荷估计 Q/{CHARGE_UNIT_LABEL}",
+                    CHARGE_CENTER_COL: f"峰中心/{CHARGE_UNIT_LABEL}",
+                    CHARGE_DISTANCE_COL: f"距离峰中心/{CHARGE_UNIT_LABEL}",
+                    CHARGE_HALF_WIDTH_COL: f"半峰宽/{CHARGE_UNIT_LABEL}",
+                })
+            st.dataframe(detail,
                          use_container_width=True,
                          hide_index=True)
 
@@ -628,17 +682,18 @@ def render_tab_classify():
 
     has_user_data = not st.session_state.data.empty
     if not has_user_data:
-        st.info("当前还没有导入测量数据。本页默认使用根目录 oil_drop_reference.csv 作为测试数据继续流程。")
+        st.info("当前还没有导入测量数据。本页默认使用内置数据作为测试数据继续流程。")
 
-    include_reference_default = not has_user_data
     include_reference = st.checkbox(
-        "使用根目录测试数据",
-        value=include_reference_default,
-        help="没有测量数据时用 D:\\GitHub\\seuphyx\\oil_drop_reference.csv 继续流程；已有测量数据时可取消勾选，仅分析实测数据。",
+        "合并内置基础数据",
+        value=True,
+        disabled=True,
+        key="classify_include_reference_v2",
+        help="学生视觉自动测量和手动录入的点如图中红色点所示。",
     )
 
     if not has_user_data and not include_reference:
-        st.caption("页面已就绪。完成视觉测量，或勾选“使用根目录测试数据”后继续。")
+        st.caption("页面已就绪。请完成视觉测量或手动录入数据。")
         return
 
     raw_measurements = _build_measurement_data(include_reference)
@@ -666,7 +721,7 @@ def render_tab_classify():
                 help="K-Means/GMM 使用该簇数；KDE 作为最多保留峰数；DBSCAN 不使用。")
         with col3:
             half_width = st.slider(
-                "半峰宽容差 / x10^-19C",
+                f"半峰宽容差 / {CHARGE_UNIT_LABEL}",
                 0.05,
                 0.80,
                 0.25,
@@ -721,7 +776,7 @@ def render_tab_classify():
         _plot_q_estimation_overview(raw_data)
 
     submitted = st.button(
-        "执行 AI 聚类，生成彩色结果",
+        "执行 AI 聚类生成结果",
         use_container_width=True,
         type="primary",
     )
